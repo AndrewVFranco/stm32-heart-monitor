@@ -1,0 +1,12 @@
+Debug/
+Release/
+build/
+cmake-build-debug/
+cmake-build-release/
+
+.elf
+.bin
+.hex
+.map
+
+*.mxprojects

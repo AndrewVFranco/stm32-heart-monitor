@@ -1,0 +1,10 @@
+.idea/
+.settings/
+.vscode/
+*.suo
+*.user
+
+.DS_Store
+Thumbs.db
+
+*.log
