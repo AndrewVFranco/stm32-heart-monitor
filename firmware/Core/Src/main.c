@@ -334,20 +334,20 @@ void StartDefaultTask(void const * argument)
   /* Infinite loop */
   for(;;)
   {
-	uint32_t potValue;
+	  uint32_t potValue;
 
-	HAL_ADC_Start(&hadc1);
+	  HAL_ADC_Start(&hadc1);
 
-	if (HAL_ADC_PollForConversion(&hadc1, 100) == HAL_OK) {
-		potValue = HAL_ADC_GetValue(&hadc1);
+	  if (HAL_ADC_PollForConversion(&hadc1, 100) == HAL_OK) {
+		  potValue = HAL_ADC_GetValue(&hadc1);
 
-		printf("Potentiometer Value:%lu\r\n", potValue);
-	}
+		  printf("Potentiometer Value:%lu\r\n", potValue);
+	  }
 
-	HAL_ADC_Stop(&hadc1);
+	  HAL_ADC_Stop(&hadc1);
 
 
-    osDelay(500);
+      osDelay(500);
   }
   /* USER CODE END 5 */
 }

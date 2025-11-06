@@ -1,9 +1,18 @@
+#CLion
+cmake-build-*/
+.idea
+
+#STM32CubeIDE
 Debug/
 Release/
 build/
-cmake-build-debug/
-cmake-build-release/
+.project
+.cproject
+.settings/
 
+#Build artifacts
+.o
+.obj
 .elf
 .bin
 .hex
