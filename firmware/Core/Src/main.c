@@ -71,6 +71,7 @@ void StartDefaultTask(void const * argument);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 #include "stdio.h"
+#include "string.h"
 /* USER CODE END 0 */
 
 /**
@@ -108,12 +109,10 @@ int main(void)
   MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
 
-  // Start timer that will trigger the ADC
-  HAL_TIM_Base_Start(&htim2);
-
   // Start the ADC in DMA mode
   HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_dma_buffer, 1);
 
+  HAL_TIM_Base_Start(&htim2);
   /* USER CODE END 2 */
 
   /* USER CODE BEGIN RTOS_MUTEX */
@@ -134,7 +133,7 @@ int main(void)
 
   /* Create the thread(s) */
   /* definition and creation of defaultTask */
-  osThreadDef(defaultTask, StartDefaultTask, osPriorityNormal, 0, 128);
+  osThreadDef(defaultTask, StartDefaultTask, osPriorityNormal, 0, 2048);
   defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
@@ -234,7 +233,7 @@ static void MX_ADC1_Init(void)
   hadc1.Init.ExternalTrigConv = ADC_EXTERNALTRIGCONV_T2_TRGO;
   hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
   hadc1.Init.NbrOfConversion = 1;
-  hadc1.Init.DMAContinuousRequests = DISABLE;
+  hadc1.Init.DMAContinuousRequests = ENABLE;
   hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
   if (HAL_ADC_Init(&hadc1) != HAL_OK)
   {
@@ -410,11 +409,15 @@ void StartDefaultTask(void const * argument)
   /* Infinite loop */
   for(;;)
   {
-    uint16_t potValue = adc_dma_buffer[0];
+	uint16_t potValue = adc_dma_buffer[0];
 
-    printf("Potentiometer Value:%u\r\n", (unsigned int)potValue);
+	char tx_buffer[100];
 
-    osDelay(100);
+	sprintf(tx_buffer, "Potentiometer Value:%u\r\n", (unsigned int)potValue);
+
+	HAL_UART_Transmit(&huart2, (uint8_t*)tx_buffer, strlen(tx_buffer), HAL_MAX_DELAY);
+
+	osDelay(100);
   }
   /* USER CODE END 5 */
 }
