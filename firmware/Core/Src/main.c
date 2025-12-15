@@ -18,7 +18,11 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "cmsis_os.h"
+#include "adc.h"
+#include "spi.h"
+#include "tim.h"
+#include "usart.h"
+#include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -41,29 +45,15 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-ADC_HandleTypeDef hadc1;
-DMA_HandleTypeDef hdma_adc1;
 
-TIM_HandleTypeDef htim2;
-
-UART_HandleTypeDef huart2;
-
-osThreadId defaultTaskHandle;
 /* USER CODE BEGIN PV */
 
-volatile uint16_t adc_dma_buffer[1];
-
+/* USER CODE BEGIN PV */
+volatile uint32_t raw_val = 0; // "volatile" forces it to exist in memory
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
-static void MX_GPIO_Init(void);
-static void MX_DMA_Init(void);
-static void MX_USART2_UART_Init(void);
-static void MX_ADC1_Init(void);
-static void MX_TIM2_Init(void);
-void StartDefaultTask(void const * argument);
-
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -72,6 +62,119 @@ void StartDefaultTask(void const * argument);
 /* USER CODE BEGIN 0 */
 #include "stdio.h"
 #include "string.h"
+/* USER CODE BEGIN 0 */
+// --- MINIMAL ILI9341 DRIVER ---
+void ILI_Write(uint8_t data, uint8_t is_cmd) {
+  // Set DC: 0 for Command, 1 for Data
+  HAL_GPIO_WritePin(TFT_DC_GPIO_Port, TFT_DC_Pin, is_cmd ? GPIO_PIN_RESET : GPIO_PIN_SET);
+
+  // Select Chip
+  HAL_GPIO_WritePin(TFT_CS_GPIO_Port, TFT_CS_Pin, GPIO_PIN_RESET);
+
+  // Transmit
+  HAL_SPI_Transmit(&hspi1, &data, 1, 100);
+
+  // Deselect Chip
+  HAL_GPIO_WritePin(TFT_CS_GPIO_Port, TFT_CS_Pin, GPIO_PIN_SET);
+}
+
+void ILI_Init_Minimal() {
+  // 1. Hard Reset
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_7, GPIO_PIN_RESET); // RST LOW
+  HAL_Delay(100);
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_7, GPIO_PIN_SET);   // RST HIGH
+  HAL_Delay(100);
+
+  // 2. Kitchen Sink Init Sequence (Forces all settings)
+  ILI_Write(0x01, 1); HAL_Delay(1000); // Software Reset
+
+  ILI_Write(0xCB, 1); ILI_Write(0x39, 0); ILI_Write(0x2C, 0); ILI_Write(0x00, 0); ILI_Write(0x34, 0); ILI_Write(0x02, 0); // Power Control A
+  ILI_Write(0xCF, 1); ILI_Write(0x00, 0); ILI_Write(0xC1, 0); ILI_Write(0x30, 0); // Power Control B
+  ILI_Write(0xE8, 1); ILI_Write(0x85, 0); ILI_Write(0x00, 0); ILI_Write(0x78, 0); // Driver Timing A
+  ILI_Write(0xEA, 1); ILI_Write(0x00, 0); ILI_Write(0x00, 0); // Driver Timing B
+  ILI_Write(0xED, 1); ILI_Write(0x64, 0); ILI_Write(0x03, 0); ILI_Write(0x12, 0); ILI_Write(0x81, 0); // Power On Sequence
+  ILI_Write(0xF7, 1); ILI_Write(0x20, 0); // Pump Ratio
+
+  ILI_Write(0xC0, 1); ILI_Write(0x23, 0); // Power Control 1
+  ILI_Write(0xC1, 1); ILI_Write(0x10, 0); // Power Control 2
+  ILI_Write(0xC5, 1); ILI_Write(0x3E, 0); ILI_Write(0x28, 0); // VCOM Control 1
+  ILI_Write(0xC7, 1); ILI_Write(0x86, 0); // VCOM Control 2
+
+  ILI_Write(0x36, 1); ILI_Write(0x48, 0); // Memory Access Control (Rotation)
+  ILI_Write(0x3A, 1); ILI_Write(0x55, 0); // Pixel Format (16-bit)
+
+  ILI_Write(0xB1, 1); ILI_Write(0x00, 0); ILI_Write(0x18, 0); // Frame Rate Control
+  ILI_Write(0xB6, 1); ILI_Write(0x08, 0); ILI_Write(0x82, 0); ILI_Write(0x27, 0); // Display Function Control
+
+  ILI_Write(0x11, 1); HAL_Delay(120);  // Sleep Out
+  ILI_Write(0x29, 1); HAL_Delay(100);  // Display On
+}
+
+void ILI_Fill_Red() {
+  // 1. Set Column Address (0 to 239)
+  ILI_Write(0x2A, 1); // CASET
+  uint8_t col_data[] = {0x00, 0x00, 0x00, 0xEF}; // 0 start, 239 end
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_9, GPIO_PIN_SET); // Data
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET); // CS Low
+  HAL_SPI_Transmit(&hspi1, col_data, 4, 100);
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET); // CS High
+
+  // 2. Set Page Address (0 to 319)
+  ILI_Write(0x2B, 1); // PASET
+  uint8_t page_data[] = {0x00, 0x00, 0x01, 0x3F}; // 0 start, 319 end
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_9, GPIO_PIN_SET); // Data
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET); // CS Low
+  HAL_SPI_Transmit(&hspi1, page_data, 4, 100);
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET); // CS High
+
+  // 3. Start Memory Write
+  ILI_Write(0x2C, 1); // RAMWR
+
+  // 4. Send Red Data
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_9, GPIO_PIN_SET); // Data
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET); // CS Low
+
+  // We send 5 lines of red at a time to keep overhead low
+  uint8_t red_line[20]; // Small buffer
+  for(int i=0; i<20; i+=2) { red_line[i] = 0xF8; red_line[i+1] = 0x00; } // Fill buffer with RED
+
+  // Total Pixels = 240 * 320 = 76,800
+  // 76,800 pixels / 10 pixels per buffer = 7680 loops
+  for(long i=0; i<7680; i++) {
+    HAL_SPI_Transmit(&hspi1, red_line, 20, 10);
+  }
+
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET); // CS High
+}
+
+// Helper to draw a single pixel
+void ILI_DrawPixel(uint16_t x, uint16_t y, uint16_t color) {
+  if(x >= 240 || y >= 320) return; // Error check
+
+  // 1. Set Column Address (x to x)
+  ILI_Write(0x2A, 1);
+  uint8_t x_data[] = {x >> 8, x & 0xFF, x >> 8, x & 0xFF};
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_9, GPIO_PIN_SET);   // DC=Data
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET); // CS=Low
+  HAL_SPI_Transmit(&hspi1, x_data, 4, 10);
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);   // CS=High
+
+  // 2. Set Page Address (y to y)
+  ILI_Write(0x2B, 1);
+  uint8_t y_data[] = {y >> 8, y & 0xFF, y >> 8, y & 0xFF};
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_9, GPIO_PIN_SET);   // DC=Data
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET); // CS=Low
+  HAL_SPI_Transmit(&hspi1, y_data, 4, 10);
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);   // CS=High
+
+  // 3. Write Memory
+  ILI_Write(0x2C, 1);
+  uint8_t color_data[] = {color >> 8, color & 0xFF};
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_9, GPIO_PIN_SET);   // DC=Data
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET); // CS=Low
+  HAL_SPI_Transmit(&hspi1, color_data, 2, 10);
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);   // CS=High
+}
 /* USER CODE END 0 */
 
 /**
@@ -103,52 +206,63 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_DMA_Init();
   MX_USART2_UART_Init();
   MX_ADC1_Init();
   MX_TIM2_Init();
+  MX_SPI1_Init();
   /* USER CODE BEGIN 2 */
+  /* USER CODE BEGIN 2 */
+  ILI_Init_Minimal();
+  ILI_Fill_Red();
+  HAL_Delay(500);
 
-  // Start the ADC in DMA mode
-  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_dma_buffer, 1);
+  // Clear to Black so we can see the green line better
+  // (Re-using the red fill logic but sending 0x0000)
+  ILI_Write(0x2C, 1);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_9, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET);
+  uint8_t black[2] = {0x00, 0x00};
+  for(long i=0; i<76800; i++) {
+    HAL_SPI_Transmit(&hspi1, black, 2, 10);
+  }
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);
 
-  HAL_TIM_Base_Start(&htim2);
+  // Start the Heart Sensor
+  HAL_ADC_Start(&hadc1);
+
+  uint16_t x = 0;
+  uint16_t last_y = 120;
   /* USER CODE END 2 */
-
-  /* USER CODE BEGIN RTOS_MUTEX */
-  /* add mutexes, ... */
-  /* USER CODE END RTOS_MUTEX */
-
-  /* USER CODE BEGIN RTOS_SEMAPHORES */
-  /* add semaphores, ... */
-  /* USER CODE END RTOS_SEMAPHORES */
-
-  /* USER CODE BEGIN RTOS_TIMERS */
-  /* start timers, add new ones, ... */
-  /* USER CODE END RTOS_TIMERS */
-
-  /* USER CODE BEGIN RTOS_QUEUES */
-  /* add queues, ... */
-  /* USER CODE END RTOS_QUEUES */
-
-  /* Create the thread(s) */
-  /* definition and creation of defaultTask */
-  osThreadDef(defaultTask, StartDefaultTask, osPriorityNormal, 0, 2048);
-  defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
-
-  /* USER CODE BEGIN RTOS_THREADS */
-  /* add threads, ... */
-  /* USER CODE END RTOS_THREADS */
-
-  /* Start scheduler */
-  osKernelStart();
-
-  /* We should never get here as control is now taken by the scheduler */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  while (1)
-  {
+  while (1) {
+    // 1. Read Sensor
+    HAL_ADC_Start(&hadc1);
+    HAL_ADC_PollForConversion(&hadc1, 10);
+    raw_val = HAL_ADC_GetValue(&hadc1); // 0 to 4095
+
+    // 2. Map 0-4095 to Screen Height (0-320)
+    // We flip it (320 - val) so higher voltage = higher on screen
+    uint16_t y = 320 - (raw_val * 320 / 4096);
+
+    // 3. Draw Scanline (Erase the future pixels to black)
+    // This creates that "sweeping bar" effect you see in hospitals
+    ILI_DrawPixel(x+1, last_y, 0x0000);
+    ILI_DrawPixel(x+1, y, 0x0000);
+    ILI_DrawPixel(x+2, y, 0x0000);
+
+    // 4. Draw the Signal (Green)
+    ILI_DrawPixel(x, y, 0x07E0);
+
+    // 5. Move across screen
+    x++;
+    if (x >= 240) {
+      x = 0; // Wrap around to start
+    }
+
+    last_y = y;
+    // No delay needed - we want it fast!
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -203,191 +317,6 @@ void SystemClock_Config(void)
   }
 }
 
-/**
-  * @brief ADC1 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_ADC1_Init(void)
-{
-
-  /* USER CODE BEGIN ADC1_Init 0 */
-
-  /* USER CODE END ADC1_Init 0 */
-
-  ADC_ChannelConfTypeDef sConfig = {0};
-
-  /* USER CODE BEGIN ADC1_Init 1 */
-
-  /* USER CODE END ADC1_Init 1 */
-
-  /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
-  */
-  hadc1.Instance = ADC1;
-  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
-  hadc1.Init.Resolution = ADC_RESOLUTION_12B;
-  hadc1.Init.ScanConvMode = DISABLE;
-  hadc1.Init.ContinuousConvMode = DISABLE;
-  hadc1.Init.DiscontinuousConvMode = DISABLE;
-  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_RISING;
-  hadc1.Init.ExternalTrigConv = ADC_EXTERNALTRIGCONV_T2_TRGO;
-  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc1.Init.NbrOfConversion = 1;
-  hadc1.Init.DMAContinuousRequests = ENABLE;
-  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
-  if (HAL_ADC_Init(&hadc1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
-  */
-  sConfig.Channel = ADC_CHANNEL_0;
-  sConfig.Rank = 1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
-  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN ADC1_Init 2 */
-
-  /* USER CODE END ADC1_Init 2 */
-
-}
-
-/**
-  * @brief TIM2 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_TIM2_Init(void)
-{
-
-  /* USER CODE BEGIN TIM2_Init 0 */
-
-  /* USER CODE END TIM2_Init 0 */
-
-  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
-  TIM_MasterConfigTypeDef sMasterConfig = {0};
-
-  /* USER CODE BEGIN TIM2_Init 1 */
-
-  /* USER CODE END TIM2_Init 1 */
-  htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 8999;
-  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 19;
-  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_UPDATE;
-  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN TIM2_Init 2 */
-
-  /* USER CODE END TIM2_Init 2 */
-
-}
-
-/**
-  * @brief USART2 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_USART2_UART_Init(void)
-{
-
-  /* USER CODE BEGIN USART2_Init 0 */
-
-  /* USER CODE END USART2_Init 0 */
-
-  /* USER CODE BEGIN USART2_Init 1 */
-
-  /* USER CODE END USART2_Init 1 */
-  huart2.Instance = USART2;
-  huart2.Init.BaudRate = 115200;
-  huart2.Init.WordLength = UART_WORDLENGTH_8B;
-  huart2.Init.StopBits = UART_STOPBITS_1;
-  huart2.Init.Parity = UART_PARITY_NONE;
-  huart2.Init.Mode = UART_MODE_TX_RX;
-  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
-  if (HAL_UART_Init(&huart2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN USART2_Init 2 */
-
-  /* USER CODE END USART2_Init 2 */
-
-}
-
-/**
-  * Enable DMA controller clock
-  */
-static void MX_DMA_Init(void)
-{
-
-  /* DMA controller clock enable */
-  __HAL_RCC_DMA2_CLK_ENABLE();
-
-  /* DMA interrupt init */
-  /* DMA2_Stream0_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 5, 0);
-  HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
-
-}
-
-/**
-  * @brief GPIO Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_GPIO_Init(void)
-{
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
-  /* USER CODE BEGIN MX_GPIO_Init_1 */
-
-  /* USER CODE END MX_GPIO_Init_1 */
-
-  /* GPIO Ports Clock Enable */
-  __HAL_RCC_GPIOC_CLK_ENABLE();
-  __HAL_RCC_GPIOH_CLK_ENABLE();
-  __HAL_RCC_GPIOA_CLK_ENABLE();
-  __HAL_RCC_GPIOB_CLK_ENABLE();
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin : B1_Pin */
-  GPIO_InitStruct.Pin = B1_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : LD2_Pin */
-  GPIO_InitStruct.Pin = LD2_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(LD2_GPIO_Port, &GPIO_InitStruct);
-
-  /* USER CODE BEGIN MX_GPIO_Init_2 */
-
-  /* USER CODE END MX_GPIO_Init_2 */
-}
-
 /* USER CODE BEGIN 4 */
 int _write(int file, char *ptr, int len)
 {
@@ -395,54 +324,6 @@ int _write(int file, char *ptr, int len)
 	return len;
 	}
 /* USER CODE END 4 */
-
-/* USER CODE BEGIN Header_StartDefaultTask */
-/**
-  * @brief  Function implementing the defaultTask thread.
-  * @param  argument: Not used
-  * @retval None
-  */
-/* USER CODE END Header_StartDefaultTask */
-void StartDefaultTask(void const * argument)
-{
-  /* USER CODE BEGIN 5 */
-  /* Infinite loop */
-  for(;;)
-  {
-	uint16_t potValue = adc_dma_buffer[0];
-
-	char tx_buffer[100];
-
-	sprintf(tx_buffer, "Potentiometer Value:%u\r\n", (unsigned int)potValue);
-
-	HAL_UART_Transmit(&huart2, (uint8_t*)tx_buffer, strlen(tx_buffer), HAL_MAX_DELAY);
-
-	osDelay(100);
-  }
-  /* USER CODE END 5 */
-}
-
-/**
-  * @brief  Period elapsed callback in non blocking mode
-  * @note   This function is called  when TIM6 interrupt took place, inside
-  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
-  * a global variable "uwTick" used as application time base.
-  * @param  htim : TIM handle
-  * @retval None
-  */
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
-{
-  /* USER CODE BEGIN Callback 0 */
-
-  /* USER CODE END Callback 0 */
-  if (htim->Instance == TIM6)
-  {
-    HAL_IncTick();
-  }
-  /* USER CODE BEGIN Callback 1 */
-
-  /* USER CODE END Callback 1 */
-}
 
 /**
   * @brief  This function is executed in case of error occurrence.
