@@ -49,7 +49,13 @@
 /* USER CODE BEGIN PV */
 
 /* USER CODE BEGIN PV */
-volatile uint32_t raw_val = 0; // "volatile" forces it to exist in memory
+#define FILTER_SIZE 8
+#define SAMPLE_RATE_MS 2
+volatile uint32_t raw_val = 0;
+uint32_t last_tick = 0;
+uint16_t filter_buffer[FILTER_SIZE] = {0}; // The circular buffer
+uint8_t filter_index = 0;                  // Current position in the buffer
+uint32_t filter_sum = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -79,13 +85,13 @@ void ILI_Write(uint8_t data, uint8_t is_cmd) {
 }
 
 void ILI_Init_Minimal() {
-  // 1. Hard Reset
+  // Hard Reset
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_7, GPIO_PIN_RESET); // RST LOW
   HAL_Delay(100);
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_7, GPIO_PIN_SET);   // RST HIGH
   HAL_Delay(100);
 
-  // 2. Kitchen Sink Init Sequence (Forces all settings)
+  // Init Sequence (Forces all settings)
   ILI_Write(0x01, 1); HAL_Delay(1000); // Software Reset
 
   ILI_Write(0xCB, 1); ILI_Write(0x39, 0); ILI_Write(0x2C, 0); ILI_Write(0x00, 0); ILI_Write(0x34, 0); ILI_Write(0x02, 0); // Power Control A
@@ -100,7 +106,7 @@ void ILI_Init_Minimal() {
   ILI_Write(0xC5, 1); ILI_Write(0x3E, 0); ILI_Write(0x28, 0); // VCOM Control 1
   ILI_Write(0xC7, 1); ILI_Write(0x86, 0); // VCOM Control 2
 
-  ILI_Write(0x36, 1); ILI_Write(0x48, 0); // Memory Access Control (Rotation)
+  ILI_Write(0x36, 1); ILI_Write(0xE8, 0); // Memory Access Control (Rotation)
   ILI_Write(0x3A, 1); ILI_Write(0x55, 0); // Pixel Format (16-bit)
 
   ILI_Write(0xB1, 1); ILI_Write(0x00, 0); ILI_Write(0x18, 0); // Frame Rate Control
@@ -110,10 +116,10 @@ void ILI_Init_Minimal() {
   ILI_Write(0x29, 1); HAL_Delay(100);  // Display On
 }
 
-void ILI_Fill_Red() {
+void ILI_Fill(char data) {
   // 1. Set Column Address (0 to 239)
   ILI_Write(0x2A, 1); // CASET
-  uint8_t col_data[] = {0x00, 0x00, 0x00, 0xEF}; // 0 start, 239 end
+  uint8_t col_data[] = {0x00, 0x00, 0x01, 0x3F}; // 0 start, 239 end
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_9, GPIO_PIN_SET); // Data
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET); // CS Low
   HAL_SPI_Transmit(&hspi1, col_data, 4, 100);
@@ -121,7 +127,7 @@ void ILI_Fill_Red() {
 
   // 2. Set Page Address (0 to 319)
   ILI_Write(0x2B, 1); // PASET
-  uint8_t page_data[] = {0x00, 0x00, 0x01, 0x3F}; // 0 start, 319 end
+  uint8_t page_data[] = {0x00, 0x00, 0x00, 0xEF}; // 0 start, 319 end
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_9, GPIO_PIN_SET); // Data
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET); // CS Low
   HAL_SPI_Transmit(&hspi1, page_data, 4, 100);
@@ -135,13 +141,13 @@ void ILI_Fill_Red() {
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET); // CS Low
 
   // We send 5 lines of red at a time to keep overhead low
-  uint8_t red_line[20]; // Small buffer
-  for(int i=0; i<20; i+=2) { red_line[i] = 0xF8; red_line[i+1] = 0x00; } // Fill buffer with RED
+  uint8_t line[20]; // Small buffer
+  for(int i=0; i<20; i+=2) { line[i] = data; line[i+1] = 0x00; } // Fill buffer color
 
   // Total Pixels = 240 * 320 = 76,800
   // 76,800 pixels / 10 pixels per buffer = 7680 loops
   for(long i=0; i<7680; i++) {
-    HAL_SPI_Transmit(&hspi1, red_line, 20, 10);
+    HAL_SPI_Transmit(&hspi1, line, 20, 10);
   }
 
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET); // CS High
@@ -149,7 +155,7 @@ void ILI_Fill_Red() {
 
 // Helper to draw a single pixel
 void ILI_DrawPixel(uint16_t x, uint16_t y, uint16_t color) {
-  if(x >= 240 || y >= 320) return; // Error check
+  if(x >= 320 || y >= 240) return; // Error check
 
   // 1. Set Column Address (x to x)
   ILI_Write(0x2A, 1);
@@ -174,6 +180,89 @@ void ILI_DrawPixel(uint16_t x, uint16_t y, uint16_t color) {
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET); // CS=Low
   HAL_SPI_Transmit(&hspi1, color_data, 2, 10);
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);   // CS=High
+}
+
+// OPTIMIZED: Uses hardware windowing to draw lines 10x faster
+void ILI_DrawVerticalLine(uint16_t x, uint16_t y1, uint16_t y2, uint16_t color) {
+  // 1. Swap coordinates if needed so we always draw Top -> Bottom
+  if (y1 > y2) {
+    uint16_t temp = y1; y1 = y2; y2 = temp;
+  }
+
+  // 2. Clipping (prevent drawing off screen)
+  if (x >= 320) return;
+  if (y1 >= 240) y1 = 0;
+  if (y2 >= 240) y2 = 319;
+
+  uint16_t height = y2 - y1 + 1;
+
+  // --- STEP 1: Define the Window (X, Y1 to Y2) ---
+
+  // Set Column Address (X to X)
+  ILI_Write(0x2A, 1);
+  uint8_t x_data[] = {x >> 8, x & 0xFF, x >> 8, x & 0xFF};
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_9, GPIO_PIN_SET);   // DC = Data
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET); // CS = Low
+  HAL_SPI_Transmit(&hspi1, x_data, 4, 10);
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);   // CS = High
+
+  // Set Page Address (Y1 to Y2) -- This is the key difference!
+  ILI_Write(0x2B, 1);
+  uint8_t y_data[] = {y1 >> 8, y1 & 0xFF, y2 >> 8, y2 & 0xFF};
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_9, GPIO_PIN_SET);   // DC = Data
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET); // CS = Low
+  HAL_SPI_Transmit(&hspi1, y_data, 4, 10);
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);   // CS = High
+
+  // --- STEP 2: Blast the Color Data ---
+
+  ILI_Write(0x2C, 1); // Memory Write Command
+
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_9, GPIO_PIN_SET);   // DC = Data
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET); // CS = Low manually
+
+  // Create a small buffer of the color to send in chunks
+  uint8_t high_byte = color >> 8;
+  uint8_t low_byte = color & 0xFF;
+  uint8_t buffer[20]; // Buffer for 10 pixels
+
+  // Fill buffer with the target color
+  for(int i=0; i<20; i+=2) {
+      buffer[i] = high_byte;
+      buffer[i+1] = low_byte;
+  }
+
+  // Send the pixels in batches
+  int pixels_remaining = height;
+  while(pixels_remaining > 0) {
+     int pixels_to_send = (pixels_remaining > 10) ? 10 : pixels_remaining;
+     HAL_SPI_Transmit(&hspi1, buffer, pixels_to_send * 2, 10);
+     pixels_remaining -= pixels_to_send;
+  }
+
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);   // Release CS
+}
+
+uint16_t Filter_Signal(uint16_t new_val) {
+  // Subtract the oldest value (at current index) from the sum
+  filter_sum -= filter_buffer[filter_index];
+
+  // Overwrite that spot with the NEW value
+  filter_buffer[filter_index] = new_val;
+
+  // Add the new value to the sum
+  filter_sum += new_val;
+
+  // Move the index forward
+  filter_index++;
+
+  // Wrap around if we hit the end of the buffer
+  if (filter_index >= FILTER_SIZE) {
+    filter_index = 0;
+  }
+
+  // 6. Return the average
+  return filter_sum / FILTER_SIZE;
 }
 /* USER CODE END 0 */
 
@@ -213,19 +302,11 @@ int main(void)
   /* USER CODE BEGIN 2 */
   /* USER CODE BEGIN 2 */
   ILI_Init_Minimal();
-  ILI_Fill_Red();
+  ILI_Fill(0xF8);
   HAL_Delay(500);
 
   // Clear to Black so we can see the green line better
-  // (Re-using the red fill logic but sending 0x0000)
-  ILI_Write(0x2C, 1);
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_9, GPIO_PIN_SET);
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET);
-  uint8_t black[2] = {0x00, 0x00};
-  for(long i=0; i<76800; i++) {
-    HAL_SPI_Transmit(&hspi1, black, 2, 10);
-  }
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);
+  ILI_Fill(0x0000);
 
   // Start the Heart Sensor
   HAL_ADC_Start(&hadc1);
@@ -237,34 +318,56 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1) {
-    // 1. Read Sensor
-    HAL_ADC_Start(&hadc1);
-    HAL_ADC_PollForConversion(&hadc1, 10);
-    raw_val = HAL_ADC_GetValue(&hadc1); // 0 to 4095
 
-    // 2. Map 0-4095 to Screen Height (0-320)
-    // We flip it (320 - val) so higher voltage = higher on screen
-    uint16_t y = 320 - (raw_val * 320 / 4096);
+    if (HAL_GetTick() - last_tick >= SAMPLE_RATE_MS)
+    {
+      // Reset the timer
+      last_tick += SAMPLE_RATE_MS;
 
-    // 3. Draw Scanline (Erase the future pixels to black)
-    // This creates that "sweeping bar" effect you see in hospitals
-    ILI_DrawPixel(x+1, last_y, 0x0000);
-    ILI_DrawPixel(x+1, y, 0x0000);
-    ILI_DrawPixel(x+2, y, 0x0000);
+      // Read ad8232 Sensor
+      HAL_ADC_Start(&hadc1);
+      HAL_ADC_PollForConversion(&hadc1, 10);
+      raw_val = HAL_ADC_GetValue(&hadc1); // 0 to 4095
 
-    // 4. Draw the Signal (Green)
-    ILI_DrawPixel(x, y, 0x07E0);
+      // Filter the data
+      uint16_t filtered_val = Filter_Signal(raw_val);
+      // 1. Center the value (Subtract the midpoint ~2048)
+      int32_t amplitude = (int32_t)filtered_val - 2048;
 
-    // 5. Move across screen
-    x++;
-    if (x >= 240) {
-      x = 0; // Wrap around to start
+      // 2. Amplify! (Multiply by 3 for 3x zoom)
+      // amplitude /= 2;
+
+      // 3. Shift back to unsigned range
+      int32_t amplitude_val = amplitude + 2048;
+
+      // 4. Map to screen HEIGHT (0-320)
+      // Note: We flip it (320 - val) because screen Y=0 is the top
+      int16_t y = 240 - (amplitude_val * 240 / 4096);
+
+      // 5. Safety Clamps (Crucial because Zoom might push it off screen!)
+      if (y < 0) y = 0;
+      if (y > 239) y = 239;
+
+      // Clear a vertical bar 5 pixels ahead of the current X
+      uint16_t erase_x = x + 5;
+      if (erase_x >= 320) erase_x -= 320; // Wrap around if needed
+
+      // Draw a full black line from top to bottom at the erase position
+      ILI_DrawVerticalLine(erase_x, 0, 319, 0x0000);
+
+      // Draw the signal
+      ILI_DrawVerticalLine(x, last_y, y, 0x07E0); // 0x07E0 = Green
+
+      // Advance drawing
+      x++;
+
+      if (x >= 320) {
+        x = 0; // Wrap around to start
+      }
+
+      last_y = y;
+      /* USER CODE END WHILE */
     }
-
-    last_y = y;
-    // No delay needed - we want it fast!
-    /* USER CODE END WHILE */
-
     /* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */
