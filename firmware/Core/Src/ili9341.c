@@ -5,8 +5,9 @@
 /* Core/Src/ili9341.c */
 
 #include "../Inc/ili9341.h"
-#include "spi.h"  // Needed for hspi1
-#include "gpio.h" // Needed for Pin definitions
+#include "spi.h"
+#include "gpio.h"
+#include "fonts.h"
 
 // External handle from spi.c
 extern SPI_HandleTypeDef hspi1;
@@ -155,4 +156,147 @@ void ILI_DrawVerticalLine(uint16_t x, uint16_t y1, uint16_t y2, uint16_t color) 
      pixels_remaining -= pixels_to_send;
   }
   HAL_GPIO_WritePin(TFT_CS_GPIO_Port, TFT_CS_Pin, GPIO_PIN_SET);
+}
+
+/* * DRAW CHARACTER
+ * x, y: Top-left coordinate
+ * c: Character to draw
+ * color: Text color
+ * bg: Background color (pass 0x0000 for black)
+ * font: Pointer to FontDef (e.g., &Font_7x10)
+ */
+void ILI_DrawChar(uint16_t x, uint16_t y, char c, uint16_t color, uint16_t bg, FontDef *font) {
+    uint32_t i, b, j;
+
+    // 1. Calculate the Offset in the font array
+    // This depends on which font we are using!
+    uint32_t position = 0;
+
+    if (font->width == 7) {
+        // Font_7x10 is standard ASCII (starts at space ' ' = 32)
+        if (c < 32 || c > 126) return; // Invalid char
+        position = (c - 32) * font->height; // Bytes per char is simply height (since width <= 8, 1 byte/row)
+        // Wait! Font7x10 uses 16-bit array? Yes in your file.
+        // 7x10 array uses 1 uint16_t per row.
+    }
+    else if (font->width == 11) {
+        // Font_11x18 is "Sparse" (Digits only)
+        // We map ASCII to our Array Indices manually:
+
+        if (c >= '0' && c <= '9') {
+            position = (c - '0') * font->height; // '0' is at index 0
+        }
+        else if (c == ' ') position = 10 * font->height; // Space is index 10
+        else if (c == 'B') position = 11 * font->height;
+        else if (c == 'P') position = 12 * font->height;
+        else if (c == 'M') position = 13 * font->height;
+        else if (c == '+') position = 14 * font->height; // Big Heart
+        else if (c == '-') position = 15 * font->height; // NEW: Small Heart
+        else return; // Unsupported character
+    }
+
+    // 2. Draw the pixels
+    for (i = 0; i < font->height; i++) {
+        // Read the row of pixels from flash
+        // Each entry in our table is uint16_t
+        uint16_t line = font->data[position + i];
+
+        for (j = 0; j < font->width; j++) {
+            // Check the bit corresponding to pixel j
+            // We shift left: (0x8000 >> j) if width=16, but width is variable.
+            // Let's assume Data is Left-Aligned in the 16-bit word.
+            // Font7x10: 0xXX00 (Upper byte).
+            // Font11x18: 0xXXX0.
+
+            // Standard generic decoding:
+            // Check bit: (line << j) & 0x8000 ?
+            if ((line << j) & 0x8000) {
+                ILI_DrawPixel(x + j, y + i, color);
+            } else {
+                ILI_DrawPixel(x + j, y + i, bg);
+            }
+        }
+    }
+}
+
+// DRAW STRING
+void ILI_WriteString(uint16_t x, uint16_t y, const char *str, uint16_t color, uint16_t bg, FontDef *font) {
+    while (*str) {
+        // Handle newline
+        if (*str == '\n') {
+            y += font->height;
+            x = 0; // Reset X (or pass original X)
+            str++;
+            continue;
+        }
+
+        // Draw char
+        ILI_DrawChar(x, y, *str, color, bg, font);
+
+        // Advance X
+        x += font->width;
+
+        // Simple wrapping
+        if (x + font->width >= 320) {
+            x = 0;
+            y += font->height;
+        }
+
+        str++;
+    }
+}
+
+void ILI_DrawHLine(uint16_t x, uint16_t y, uint16_t w, uint16_t color) {
+    ILI_FillRectangle(x, y, w, 1, color);
+}
+
+void ILI_FillRectangle(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color) {
+    // 1. Check bounds (optional but safe)
+    if ((x >= 320) || (y >= 240)) return;
+    if ((x + w - 1) >= 320) w = 320 - x;
+    if ((y + h - 1) >= 240) h = 240 - y;
+
+    // 2. Select the Block (Column Address Set)
+    ILI_Write(0x2A, 1); // CASET
+    uint8_t x_data[] = { x >> 8, x & 0xFF, (x + w - 1) >> 8, (x + w - 1) & 0xFF };
+    HAL_GPIO_WritePin(TFT_DC_GPIO_Port, TFT_DC_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(TFT_CS_GPIO_Port, TFT_CS_Pin, GPIO_PIN_RESET);
+    HAL_SPI_Transmit(&hspi1, x_data, 4, 10);
+    HAL_GPIO_WritePin(TFT_CS_GPIO_Port, TFT_CS_Pin, GPIO_PIN_SET);
+
+    // 3. Select the Block (Page Address Set)
+    ILI_Write(0x2B, 1); // PASET
+    uint8_t y_data[] = { y >> 8, y & 0xFF, (y + h - 1) >> 8, (y + h - 1) & 0xFF };
+    HAL_GPIO_WritePin(TFT_DC_GPIO_Port, TFT_DC_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(TFT_CS_GPIO_Port, TFT_CS_Pin, GPIO_PIN_RESET);
+    HAL_SPI_Transmit(&hspi1, y_data, 4, 10);
+    HAL_GPIO_WritePin(TFT_CS_GPIO_Port, TFT_CS_Pin, GPIO_PIN_SET);
+
+    // 4. Send Color Data (Memory Write)
+    ILI_Write(0x2C, 1); // RAMWR
+
+    uint32_t total_pixels = w * h;
+
+    // Prepare a small buffer to speed things up (sending 2 bytes at a time is slow)
+    // We will send chunks of pixels.
+    #define BUF_SIZE 64
+    uint8_t color_buffer[BUF_SIZE * 2];
+
+    // Fill buffer with the target color
+    for (int i = 0; i < BUF_SIZE; i++) {
+        color_buffer[i * 2] = color >> 8;
+        color_buffer[i * 2 + 1] = color & 0xFF;
+    }
+
+    HAL_GPIO_WritePin(TFT_DC_GPIO_Port, TFT_DC_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(TFT_CS_GPIO_Port, TFT_CS_Pin, GPIO_PIN_RESET);
+
+    // Blast the data
+    while (total_pixels > 0) {
+        uint32_t chunk = (total_pixels > BUF_SIZE) ? BUF_SIZE : total_pixels;
+        HAL_SPI_Transmit(&hspi1, color_buffer, chunk * 2, 100);
+        total_pixels -= chunk;
+    }
+
+    HAL_GPIO_WritePin(TFT_CS_GPIO_Port, TFT_CS_Pin, GPIO_PIN_SET);
 }

@@ -7,6 +7,7 @@
 /* Core/Inc/ili9341.h */
 
 #include "main.h"
+#include "fonts.h"
 
 // Basic Colors
 #define ILI_BLACK   0x0000
@@ -21,5 +22,9 @@ void ILI_Fill(uint16_t color);
 void ILI_DrawPixel(uint16_t x, uint16_t y, uint16_t color);
 void ILI_DrawVerticalLine(uint16_t x, uint16_t y1, uint16_t y2, uint16_t color);
 void ILI_Write(uint8_t data, uint8_t is_cmd);
+void ILI_DrawChar(uint16_t x, uint16_t y, char c, uint16_t color, uint16_t bg, FontDef *font);
+void ILI_WriteString(uint16_t x, uint16_t y, const char *str, uint16_t color, uint16_t bg, FontDef *font);
+void ILI_DrawHLine(uint16_t x, uint16_t y, uint16_t w, uint16_t color);
+void ILI_FillRectangle(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color);
 
 #endif //STM32_HEART_MONITOR_ILI9348_H
