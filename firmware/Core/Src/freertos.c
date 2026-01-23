@@ -22,6 +22,7 @@
 #include "task.h"
 #include "main.h"
 #include "cmsis_os.h"
+#include "PanTompkins.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -47,25 +48,21 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
-typedef enum {
-  STATE_BOOT,
-  STATE_NORMAL,
-  STATE_ASYSTOLE
-} MonitorState_t;
 
 // --- SHARED DATA ---
 volatile uint8_t global_bpm = 0;
-volatile MonitorState_t global_state = STATE_BOOT;
+
+uint8_t hold_count = 10;
+uint16_t line_color = 0x07E0; // Default Green
 
 // --- PAN-TOMPKINS SETTINGS ---
-#define WINDOW_SIZE 30
+#define WINDOW_SIZE 50
 #define MAX_SLOPE 150
 #define SLOPE_THRESHOLD 20000
-#define MIN_PEAK_AMPLITUDE 1000
-#define ASYSTOLE_MS 4000
+#define ASYSTOLE_MS 3000
 
-
-volatile uint8_t amplitude = 1.5;
+const float amplitude = 1.0f;
+volatile uint8_t beat_detected_debug_flag = 0;
 
 // --- HARDWARE HANDLES (Defined in main.c) ---
 extern ADC_HandleTypeDef hadc1;
@@ -176,133 +173,62 @@ void MX_FREERTOS_Init(void) {
 void StartDefaultTask(void const * argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
-uint16_t val_from_queue;
+  PT_init();
+  uint16_t val_from_queue;
+  uint32_t current_time;
 
-  // --- SIGNAL PROCESSING VARIABLES ---
-  uint32_t sample_average_sum = 0;
-  uint8_t sample_count = 0;
-  const uint8_t samples_per_pixel = 7;
-  const float amplitude = 1.0f;
+  // --- GRAPH SIGNAL PROCESSING VARIABLES ---
+  uint32_t graph_average_sum = 0;
+  uint8_t graph_count = 0;
+  const uint8_t graph_downsample = 7;
 
-  // --- PAN-TOMPKINS VARIABLES ---
-  #define WINDOW_SIZE 30
-  #define MAX_SLOPE 150
-  #define SLOPE_THRESHOLD 20000
-
-  static uint32_t integration_buffer[WINDOW_SIZE] = {0};
-  static uint8_t window_ptr = 0;
-  static uint32_t running_sum = 0;
-  static uint16_t prev_raw = 2048;
-
-  // --- BEAT DETECTION STATE MACHINE ---
-  typedef enum { BEAT_IDLE, BEAT_RISING, BEAT_COOLDOWN } BeatState_t;
-  BeatState_t beat_state = BEAT_IDLE;
-  uint32_t last_beat_time = 0;
-  uint32_t peak_value = 0;
-
-  // --- HR AVERAGING ---
+  // --- HR CALCULATION ---
   #define BPM_BUFFER_SIZE 5
   uint32_t bpm_buffer[BPM_BUFFER_SIZE] = {0};
-  uint8_t bpm_ptr = 0;
+  uint8_t bpm_idx = 0;
+  uint32_t last_beat_time = 0;
+
+  uint32_t hr_sum = 0;
+  uint8_t hr_count = 0;
+  uint16_t hr_downsample = 5;
 
   // --- DISPLAY VARIABLES ---
   static uint8_t dma_buffer[480]; // Buffer for one vertical line (240 pixels * 2 bytes)
-  uint16_t x_pos = 0;
-  uint16_t last_y_pos = 120;
-
-  // --- INITIAL SETUP ---
-  ILI_Fill(0x0000);
-  ILI_DrawHLine(0, 50, 320, 0x7BEF); // Header Line
 
   for (;;)
   {
-    // 1. ASYSTOLE CHECK (Safety Timeout)
-    if ((HAL_GetTick() - last_beat_time) > ASYSTOLE_MS) {
-      global_state = STATE_ASYSTOLE;
-      global_bpm = 0;
+      current_time = HAL_GetTick();
 
-      beat_state = BEAT_IDLE;
-    }
+      if ((current_time - last_beat_time) > ASYSTOLE_MS) {
+
+          // Push '0' into the averaging buffer to drag the average down smoothly when no beats are detected
+          bpm_buffer[bpm_idx] = 0;
+          bpm_idx = (bpm_idx + 1) % BPM_BUFFER_SIZE;
+
+          // Recalculate Global BPM
+          uint16_t sum = 0;
+          for(int i=0; i<BPM_BUFFER_SIZE; i++) {
+              sum += bpm_buffer[i];
+          }
+          // Use full buffer size for division so average drops accurately
+          global_bpm = sum / BPM_BUFFER_SIZE;
+
+      }
 
     // 2. DATA PROCESSING
-    // We wait 10ms for data. If empty, we loop back.
-    if (xQueueReceive(ecgQueue, &val_from_queue, 10) == pdTRUE) {
+    if (xQueueReceive(ecgQueue, &val_from_queue, 1) == pdTRUE) {
 
-      sample_average_sum += val_from_queue;
-      sample_count++;
+      graph_average_sum += val_from_queue;
+      graph_count++;
 
-      // Downsampling: Only process 1 pixel for every 7 samples
-      if (sample_count >= samples_per_pixel) {
+      hr_sum += val_from_queue;
+      hr_count++;
 
-        uint16_t val_to_draw = sample_average_sum / samples_per_pixel;
-        sample_average_sum = 0;
-        sample_count = 0;
-
-        // --- PAN-TOMPKINS ALGORITHM ---
-        int16_t slope = (int16_t)val_to_draw - prev_raw;
-        prev_raw = val_to_draw;
-
-        // Clamp slope
-        if (slope > MAX_SLOPE) slope = MAX_SLOPE;
-        if (slope < -MAX_SLOPE) slope = -MAX_SLOPE;
-
-        int32_t squared_slope = (int32_t)slope * slope;
-
-        running_sum -= integration_buffer[window_ptr];
-        integration_buffer[window_ptr] = squared_slope;
-        running_sum += squared_slope;
-
-        window_ptr++;
-        if (window_ptr >= WINDOW_SIZE) window_ptr = 0;
-
-        // --- BEAT DETECTION STATE MACHINE ---
-        uint32_t now = HAL_GetTick();
-
-        switch (beat_state) {
-          case BEAT_IDLE:
-             // Wait for signal to rise above the noise floor
-             if (running_sum > SLOPE_THRESHOLD) {
-                 beat_state = BEAT_RISING;
-                 peak_value = running_sum;
-             }
-             break;
-
-            case BEAT_RISING:
-                if (running_sum > peak_value) peak_value = running_sum;
-
-                if (running_sum < (peak_value / 2)) {
-
-                    // 1. Check Noise
-                    if (peak_value < MIN_PEAK_AMPLITUDE) {
-                        beat_state = BEAT_IDLE;
-                        break;
-                    }
-
-                    // 2. Valid Beat confirmed
-                    uint32_t diff = now - last_beat_time;
-
-                    // 3. Reset the "Stopwatch" for Asystole
-                    // Crucial: Update this even if BPM is weird, so we don't go to 0
-                    last_beat_time = now;
-
-                    if (diff > 250) {
-                        // ... Calculate BPM ...
-                    }
-                    beat_state = BEAT_COOLDOWN;
-                }
-                break;
-
-          case BEAT_COOLDOWN:
-             // Wait for signal to return to baseline before looking for next beat
-             if (running_sum < (SLOPE_THRESHOLD / 2)) {
-                 beat_state = BEAT_IDLE;
-             }
-             // Timeout safety: if signal stays high for >150ms, force reset
-             if (now - last_beat_time > 150) {
-                 beat_state = BEAT_IDLE;
-             }
-             break;
-        }
+      // Downsampling
+      if (graph_count >= graph_downsample) {
+          uint16_t val_to_draw = graph_average_sum / graph_downsample;
+          graph_average_sum = 0;
+          graph_count = 0;
 
         // --- DRAWING LOGIC (DMA) ---
         // Calculate Y position
@@ -329,9 +255,23 @@ uint16_t val_from_queue;
         if (y1 > y2) { uint16_t temp = y1; y1 = y2; y2 = temp; }
         uint16_t height = y2 - y1 + 1;
 
+        // DEBUG HEART BEAT CHECK
+
+        if (beat_detected_debug_flag == 1) {
+          if (hold_count > 0) {
+            line_color = 0xF800; // RED
+            hold_count--;
+          }
+          else {
+            beat_detected_debug_flag = 0; // Reset flag
+            line_color = 0x07E0; // Default Green
+            hold_count = 10;
+          }
+        }
+
         for(int i=0; i < height * 2; i+=2) {
-           dma_buffer[i]   = 0x07; // High Byte (Green)
-           dma_buffer[i+1] = 0xE0; // Low Byte (Green)
+           dma_buffer[i]   = (line_color >> 8) & 0xFF; // High Byte (Green)
+           dma_buffer[i+1] = line_color & 0xFF; // Low Byte (Green)
         }
 
         // 4. Send to Screen (Manual Address + DMA)
@@ -374,6 +314,27 @@ uint16_t val_from_queue;
         last_y_pos = y;
         x_pos++;
         if (x_pos >= 320) x_pos = 0;
+      }
+
+      int16_t result_bpm;
+
+      // --- HR CALCULATION ---
+      if (hr_count >= hr_downsample) {
+        uint32_t raw_avg = hr_sum / hr_downsample;
+        int16_t clean_val = ((int16_t)raw_avg - 2048) / 2; // Subtract 100 to compensate for noise
+        hr_sum = 0;
+        hr_count = 0;
+
+
+        // Pipe the raw ADC value to the library
+        int16_t latency_val = PT_StateMachine(clean_val);
+
+        if (latency_val > 0) {
+          result_bpm = PT_get_ShortTimeHR_output(200);
+          global_bpm = result_bpm;
+          last_beat_time = current_time;
+          beat_detected_debug_flag = 1;
+        }
       }
     }
   }
@@ -420,19 +381,13 @@ void StartTask02(void const * argument)
 /* USER CODE END Header_StartTask03 */
 void Safe_DrawString(uint16_t x, uint16_t y, char *str, uint16_t color, uint16_t bgcolor, FontDef *font) {
     while (*str) {
-        // Grab the bus just for ONE character
         if (xSemaphoreTake(lcdSpiSemaphore, portMAX_DELAY) == pdTRUE) {
             ILI_DrawChar(x, y, *str, color, bgcolor, font);
             xSemaphoreGive(lcdSpiSemaphore);
         }
 
-        // Move X position for the next character
         x += font->width;
-
-        // Move to next character in the string
         str++;
-
-        // Force a context switch to let the Graph Task run if it needs to
         osDelay(1);
     }
 }
@@ -442,35 +397,28 @@ void StartTask03(void const * argument)
 {
   /* USER CODE BEGIN StartUITask */
   char bpm_str[16];
-  uint8_t old_bpm = 255;
-  MonitorState_t old_state = STATE_BOOT;
-
+  uint8_t last_drawn_bpm = 255;
 
   if (xSemaphoreTake(lcdSpiSemaphore, portMAX_DELAY) == pdTRUE) {
-      ILI_WriteString(10, 10, "ECG MONITOR", 0xFFFF, 0x0000, &Font_7x10);
       ILI_Fill(0x0000);
+      ILI_WriteString(10, 10, "ECG MONITOR", 0xFFFF, 0x0000, &Font_7x10);
       ILI_DrawHLine(0, 50, 320, 0x7BEF); // Header Line
       xSemaphoreGive(lcdSpiSemaphore);
   }
 
   for (;;)
   {
-    osDelay(250);
+    osDelay(200);
 
-    if (global_bpm != old_bpm || global_state != old_state) {
-
-        if (global_state == STATE_ASYSTOLE) {
-            Safe_DrawString(10, 30, "ASYSTOLE  ", 0xF800, 0x0000, &Font_11x18);
-        }
-        else {
-            sprintf(bpm_str, "%3d BPM +   ", global_bpm);
-            Safe_DrawString(-10, 30, bpm_str, 0xF800, 0x0000, &Font_11x18);
-        }
-
-        old_bpm = global_bpm;
-        old_state = global_state;
-
-        xSemaphoreGive(lcdSpiSemaphore);
+    if (global_bpm != last_drawn_bpm) {
+      if (global_bpm == 0) {
+        Safe_DrawString(0, 30, "- 0 BPM     ", 0xF800, 0x0000, &Font_11x18);
+      }
+      else {
+        sprintf(bpm_str, "- %3d BPM    ", global_bpm);
+        Safe_DrawString(0, 30, bpm_str, 0xF800, 0x0000, &Font_11x18);
+      }
+      last_drawn_bpm = global_bpm;
     }
   }
   /* USER CODE END StartUITask */
