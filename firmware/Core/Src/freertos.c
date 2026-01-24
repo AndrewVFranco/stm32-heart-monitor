@@ -29,6 +29,7 @@
 #include <stdio.h>
 #include "ili9341.h"
 #include "filter.h"
+#include "ad8232.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -87,9 +88,9 @@ osThreadId UITaskHandle;
 
 /* USER CODE END FunctionPrototypes */
 
-void StartDefaultTask(void const * argument);
-void StartTask02(void const * argument);
-void StartTask03(void const * argument);
+void Algorithm_Task(void const * argument);
+void Data_Task(void const * argument);
+void GUI_Task(void const * argument);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
@@ -146,15 +147,15 @@ void MX_FREERTOS_Init(void) {
 
   /* Create the thread(s) */
   /* definition and creation of graphTask */
-  osThreadDef(graphTask, StartDefaultTask, osPriorityNormal, 0, 512);
+  osThreadDef(graphTask, Algorithm_Task, osPriorityNormal, 0, 512);
   graphTaskHandle = osThreadCreate(osThread(graphTask), NULL);
 
   /* definition and creation of sensorTask */
-  osThreadDef(sensorTask, StartTask02, osPriorityRealtime, 0, 256);
+  osThreadDef(sensorTask, Data_Task, osPriorityRealtime, 0, 256);
   sensorTaskHandle = osThreadCreate(osThread(sensorTask), NULL);
 
   /* definition and creation of UITask */
-  osThreadDef(UITask, StartTask03, osPriorityLow, 0, 128);
+  osThreadDef(UITask, GUI_Task, osPriorityLow, 0, 128);
   UITaskHandle = osThreadCreate(osThread(UITask), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
@@ -170,7 +171,7 @@ void MX_FREERTOS_Init(void) {
   * @retval None
   */
 /* USER CODE END Header_StartDefaultTask */
-void StartDefaultTask(void const * argument)
+void Algorithm_Task(void const * argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
   PT_init();
@@ -348,24 +349,41 @@ void StartDefaultTask(void const * argument)
 * @retval None
 */
 /* USER CODE END Header_StartTask02 */
-void StartTask02(void const * argument)
+void Data_Task(void const * argument)
 {
   /* USER CODE BEGIN StartTask02 */
-  TickType_t xLastWakeTime;
-  // 1ms = 1000Hz Sampling
+  TickType_t xLastWakeTime = xTaskGetTickCount();
+
+  // Define Sample Rate - 1ms = 1000Hz Sampling
   const TickType_t xFrequency = pdMS_TO_TICKS(1);
-  xLastWakeTime = xTaskGetTickCount();
+
+  // Debug to check dropped samples
+  static uint32_t dropped_sample_count = 0;
 
   for(;;)
+
   {
-    HAL_ADC_PollForConversion(&hadc1, 2);
-    uint16_t raw = HAL_ADC_GetValue(&hadc1);
+    // --- Start Polling Sequence ---
     HAL_ADC_Start(&hadc1);
 
-    // Minimal Noise Filter
-    uint16_t filtered = Filter_Signal(raw);
+    // Check if hardware is active
+    if (HAL_ADC_PollForConversion(&hadc1, 2) == HAL_OK) {
 
-    xQueueSend(ecgQueue, &filtered, 0);
+      // Read data from the HAL
+      uint16_t raw = AD8232_Read();
+
+      // Minimal Noise Filter (O(1))
+      uint16_t filtered = Filter_Signal(raw);
+
+      // Queue error handling
+      if (xQueueSend(ecgQueue, &filtered, 0) != pdTRUE) {
+        dropped_sample_count++;
+      }
+      else {
+        // Hardware Failure Mode: ADC did not respond
+        // feat: Add Hardware Error Message Here
+      }
+    }
 
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
   }
@@ -393,7 +411,7 @@ void Safe_DrawString(uint16_t x, uint16_t y, char *str, uint16_t color, uint16_t
 }
 
 /* USER CODE END Header_StartUITask */
-void StartTask03(void const * argument)
+void GUI_Task(void const * argument)
 {
   /* USER CODE BEGIN StartUITask */
   char bpm_str[16];
