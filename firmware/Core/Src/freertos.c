@@ -30,6 +30,9 @@
 #include "ili9341.h"
 #include "filter.h"
 #include "ad8232.h"
+#include "graph.h"
+#include "heart_rate.h"
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -52,17 +55,6 @@
 
 // --- SHARED DATA ---
 volatile uint8_t global_bpm = 0;
-
-uint8_t hold_count = 10;
-uint16_t line_color = 0x07E0; // Default Green
-
-// --- PAN-TOMPKINS SETTINGS ---
-#define WINDOW_SIZE 50
-#define MAX_SLOPE 150
-#define SLOPE_THRESHOLD 20000
-#define ASYSTOLE_MS 3000
-
-const float amplitude = 1.0f;
 volatile uint8_t beat_detected_debug_flag = 0;
 
 // --- HARDWARE HANDLES (Defined in main.c) ---
@@ -72,11 +64,6 @@ extern SPI_HandleTypeDef hspi1;
 // --- RTOS OBJECTS ---
 QueueHandle_t ecgQueue;
 SemaphoreHandle_t lcdSpiSemaphore;
-
-// --- DISPLAY STATE ---
-uint16_t x_pos = 0;
-uint16_t last_y_pos = 120;
-uint16_t height = 240;
 
 /* USER CODE END Variables */
 osThreadId graphTaskHandle;
@@ -178,165 +165,16 @@ void Algorithm_Task(void const * argument)
   uint16_t val_from_queue;
   uint32_t current_time;
 
-  // --- GRAPH SIGNAL PROCESSING VARIABLES ---
-  uint32_t graph_average_sum = 0;
-  uint8_t graph_count = 0;
-  const uint8_t graph_downsample = 7;
-
-  // --- HR CALCULATION ---
-  #define BPM_BUFFER_SIZE 5
-  uint32_t bpm_buffer[BPM_BUFFER_SIZE] = {0};
-  uint8_t bpm_idx = 0;
-  uint32_t last_beat_time = 0;
-
-  uint32_t hr_sum = 0;
-  uint8_t hr_count = 0;
-  uint16_t hr_downsample = 5;
-
-  // --- DISPLAY VARIABLES ---
-  static uint8_t dma_buffer[480]; // Buffer for one vertical line (240 pixels * 2 bytes)
-
   for (;;)
   {
       current_time = HAL_GetTick();
 
-      if ((current_time - last_beat_time) > ASYSTOLE_MS) {
-
-          // Push '0' into the averaging buffer to drag the average down smoothly when no beats are detected
-          bpm_buffer[bpm_idx] = 0;
-          bpm_idx = (bpm_idx + 1) % BPM_BUFFER_SIZE;
-
-          // Recalculate Global BPM
-          uint16_t sum = 0;
-          for(int i=0; i<BPM_BUFFER_SIZE; i++) {
-              sum += bpm_buffer[i];
-          }
-          // Use full buffer size for division so average drops accurately
-          global_bpm = sum / BPM_BUFFER_SIZE;
-
-      }
-
-    // 2. DATA PROCESSING
+    // --- DATA PROCESSING ---
     if (xQueueReceive(ecgQueue, &val_from_queue, 1) == pdTRUE) {
 
-      graph_average_sum += val_from_queue;
-      graph_count++;
+      Process_Graph(val_from_queue);
+      Process_HeartRate(val_from_queue, current_time);
 
-      hr_sum += val_from_queue;
-      hr_count++;
-
-      // Downsampling
-      if (graph_count >= graph_downsample) {
-          uint16_t val_to_draw = graph_average_sum / graph_downsample;
-          graph_average_sum = 0;
-          graph_count = 0;
-
-        // --- DRAWING LOGIC (DMA) ---
-        // Calculate Y position
-        int32_t centered = (int32_t)val_to_draw - 2048;
-        centered *= amplitude;
-        int16_t y = 120 - (centered * 120 / 2048);
-
-        // Safety Clamp (Keep Y between 51 and 239)
-        if (y < 51) y = 51;
-        if (y > 239) y = 239;
-
-        // Erase Ahead of Graph
-        uint16_t erase_x = x_pos + 5;
-        if (erase_x >= 320) erase_x -= 320;
-
-        if (xSemaphoreTake(lcdSpiSemaphore, portMAX_DELAY) == pdTRUE) {
-           ILI_DrawVerticalLine(erase_x, 51, 239, 0x0000);
-           xSemaphoreGive(lcdSpiSemaphore);
-        }
-
-        // 3. Prepare DMA Buffer (Green Pixels)
-        uint16_t y1 = last_y_pos;
-        uint16_t y2 = y;
-        if (y1 > y2) { uint16_t temp = y1; y1 = y2; y2 = temp; }
-        uint16_t height = y2 - y1 + 1;
-
-        // DEBUG HEART BEAT CHECK
-
-        if (beat_detected_debug_flag == 1) {
-          if (hold_count > 0) {
-            line_color = 0xF800; // RED
-            hold_count--;
-          }
-          else {
-            beat_detected_debug_flag = 0; // Reset flag
-            line_color = 0x07E0; // Default Green
-            hold_count = 10;
-          }
-        }
-
-        for(int i=0; i < height * 2; i+=2) {
-           dma_buffer[i]   = (line_color >> 8) & 0xFF; // High Byte (Green)
-           dma_buffer[i+1] = line_color & 0xFF; // Low Byte (Green)
-        }
-
-        // 4. Send to Screen (Manual Address + DMA)
-        if (xSemaphoreTake(lcdSpiSemaphore, portMAX_DELAY) == pdTRUE) {
-
-           // --- Manual Address Window Setup ---
-           // Column Address Set (X)
-           ILI_Write(0x2A, 1);
-           uint8_t x_d[] = {x_pos>>8, x_pos&0xFF, x_pos>>8, x_pos&0xFF};
-           HAL_GPIO_WritePin(TFT_DC_GPIO_Port, TFT_DC_Pin, GPIO_PIN_SET);
-           HAL_GPIO_WritePin(TFT_CS_GPIO_Port, TFT_CS_Pin, GPIO_PIN_RESET);
-           HAL_SPI_Transmit(&hspi1, x_d, 4, 10);
-           HAL_GPIO_WritePin(TFT_CS_GPIO_Port, TFT_CS_Pin, GPIO_PIN_SET);
-
-           // Page Address Set (Y)
-           ILI_Write(0x2B, 1);
-           uint8_t y_d[] = {y1>>8, y1&0xFF, y2>>8, y2&0xFF};
-           HAL_GPIO_WritePin(TFT_DC_GPIO_Port, TFT_DC_Pin, GPIO_PIN_SET);
-           HAL_GPIO_WritePin(TFT_CS_GPIO_Port, TFT_CS_Pin, GPIO_PIN_RESET);
-           HAL_SPI_Transmit(&hspi1, y_d, 4, 10);
-           HAL_GPIO_WritePin(TFT_CS_GPIO_Port, TFT_CS_Pin, GPIO_PIN_SET);
-
-           // Memory Write
-           ILI_Write(0x2C, 1);
-           HAL_GPIO_WritePin(TFT_DC_GPIO_Port, TFT_DC_Pin, GPIO_PIN_SET);
-           HAL_GPIO_WritePin(TFT_CS_GPIO_Port, TFT_CS_Pin, GPIO_PIN_SET);
-           // Tiny delay to ensure CS stable
-           for(volatile int i=0; i<10; i++);
-           HAL_GPIO_WritePin(TFT_CS_GPIO_Port, TFT_CS_Pin, GPIO_PIN_RESET);
-
-           // --- DMA Transfer ---
-           // NOTE: We do NOT give the semaphore here. It is given in the ISR callback!
-           if (HAL_SPI_Transmit_DMA(&hspi1, dma_buffer, height * 2) != HAL_OK) {
-               // If DMA fails to start, we must release CS and Semaphore manually
-               HAL_GPIO_WritePin(TFT_CS_GPIO_Port, TFT_CS_Pin, GPIO_PIN_SET);
-               xSemaphoreGive(lcdSpiSemaphore);
-           }
-        }
-
-        last_y_pos = y;
-        x_pos++;
-        if (x_pos >= 320) x_pos = 0;
-      }
-
-      int16_t result_bpm;
-
-      // --- HR CALCULATION ---
-      if (hr_count >= hr_downsample) {
-        uint32_t raw_avg = hr_sum / hr_downsample;
-        int16_t clean_val = ((int16_t)raw_avg - 2048) / 2; // Subtract 100 to compensate for noise
-        hr_sum = 0;
-        hr_count = 0;
-
-
-        // Pipe the raw ADC value to the library
-        int16_t latency_val = PT_StateMachine(clean_val);
-
-        if (latency_val > 0) {
-          result_bpm = PT_get_ShortTimeHR_output(200);
-          global_bpm = result_bpm;
-          last_beat_time = current_time;
-          beat_detected_debug_flag = 1;
-        }
-      }
     }
   }
   /* USER CODE END StartDefaultTask */
@@ -397,19 +235,6 @@ void Data_Task(void const * argument)
 * @retval None
 */
 /* USER CODE END Header_StartTask03 */
-void Safe_DrawString(uint16_t x, uint16_t y, char *str, uint16_t color, uint16_t bgcolor, FontDef *font) {
-    while (*str) {
-        if (xSemaphoreTake(lcdSpiSemaphore, portMAX_DELAY) == pdTRUE) {
-            ILI_DrawChar(x, y, *str, color, bgcolor, font);
-            xSemaphoreGive(lcdSpiSemaphore);
-        }
-
-        x += font->width;
-        str++;
-        osDelay(1);
-    }
-}
-
 /* USER CODE END Header_StartUITask */
 void GUI_Task(void const * argument)
 {
@@ -430,11 +255,11 @@ void GUI_Task(void const * argument)
 
     if (global_bpm != last_drawn_bpm) {
       if (global_bpm == 0) {
-        Safe_DrawString(0, 30, "- 0 BPM     ", 0xF800, 0x0000, &Font_11x18);
+        ILI_Safe_WriteString(0, 30, "- 0 BPM     ", 0xF800, 0x0000, &Font_11x18);
       }
       else {
         sprintf(bpm_str, "- %3d BPM    ", global_bpm);
-        Safe_DrawString(0, 30, bpm_str, 0xF800, 0x0000, &Font_11x18);
+        ILI_Safe_WriteString(0, 30, bpm_str, 0xF800, 0x0000, &Font_11x18);
       }
       last_drawn_bpm = global_bpm;
     }

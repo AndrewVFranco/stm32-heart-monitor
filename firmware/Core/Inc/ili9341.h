@@ -24,6 +24,7 @@ void ILI_DrawVerticalLine(uint16_t x, uint16_t y1, uint16_t y2, uint16_t color);
 void ILI_Write(uint8_t data, uint8_t is_cmd);
 void ILI_DrawChar(uint16_t x, uint16_t y, char c, uint16_t color, uint16_t bg, FontDef *font);
 void ILI_WriteString(uint16_t x, uint16_t y, const char *str, uint16_t color, uint16_t bg, FontDef *font);
+void ILI_Safe_WriteString(uint16_t x, uint16_t y, char *str, uint16_t color, uint16_t bgcolor, FontDef *font);
 void ILI_DrawHLine(uint16_t x, uint16_t y, uint16_t w, uint16_t color);
 void ILI_FillRectangle(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color);
 

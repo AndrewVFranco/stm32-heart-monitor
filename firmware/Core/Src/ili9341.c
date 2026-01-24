@@ -4,13 +4,14 @@
 
 /* Core/Src/ili9341.c */
 
-#include "../Inc/ili9341.h"
+#include "ili9341.h"
 #include "spi.h"
-#include "gpio.h"
 #include "fonts.h"
+#include "cmsis_os.h"  // For osDelay
+#include "semphr.h"    // For Semaphore definitions
 
-// External handle from spi.c
 extern SPI_HandleTypeDef hspi1;
+extern SemaphoreHandle_t lcdSpiSemaphore;
 
 // --- LOW LEVEL ---
 
@@ -243,6 +244,19 @@ void ILI_WriteString(uint16_t x, uint16_t y, const char *str, uint16_t color, ui
         }
 
         str++;
+    }
+}
+
+void ILI_Safe_WriteString(uint16_t x, uint16_t y, char *str, uint16_t color, uint16_t bgcolor, FontDef *font) {
+    while (*str) {
+        if (xSemaphoreTake(lcdSpiSemaphore, portMAX_DELAY) == pdTRUE) {
+            ILI_DrawChar(x, y, *str, color, bgcolor, font);
+            xSemaphoreGive(lcdSpiSemaphore);
+        }
+
+        x += font->width;
+        str++;
+        osDelay(1);
     }
 }
 
