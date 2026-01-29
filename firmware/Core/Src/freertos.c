@@ -56,7 +56,9 @@
 
 // --- SHARED DATA ---
 volatile uint8_t global_bpm = 0;
-volatile uint8_t beat_detected_debug_flag = 0;
+
+// HR Debug
+// volatile uint8_t beat_detected_debug_flag = 0;
 
 // --- HARDWARE HANDLES (Defined in main.c) ---
 extern ADC_HandleTypeDef hadc1;

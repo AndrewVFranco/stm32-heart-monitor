@@ -17,7 +17,9 @@ static const uint16_t hr_downsample = 5;
 static int16_t result_bpm;
 
 extern volatile uint8_t global_bpm;
-extern volatile uint8_t beat_detected_debug_flag;
+
+// HR Debug
+// extern volatile uint8_t beat_detected_debug_flag; DEBUG
 
 
 void Process_HeartRate(uint16_t raw_value, uint32_t current_time) {
@@ -63,7 +65,7 @@ void Process_HeartRate(uint16_t raw_value, uint32_t current_time) {
             global_bpm = sum / BPM_BUFFER_SIZE;
 
             last_beat_time = current_time;
-            beat_detected_debug_flag = 1;
+            // beat_detected_debug_flag = 1; DEBUG
         }
     }
 }
