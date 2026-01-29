@@ -26,6 +26,8 @@
 #include "semphr.h"
 
 extern SemaphoreHandle_t lcdSpiSemaphore;
+extern ADC_HandleTypeDef hadc1;
+extern QueueHandle_t ecgQueue;
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -59,6 +61,7 @@ extern SemaphoreHandle_t lcdSpiSemaphore;
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/
+extern ADC_HandleTypeDef hadc1;
 extern DMA_HandleTypeDef hdma_spi1_tx;
 extern SPI_HandleTypeDef hspi1;
 extern TIM_HandleTypeDef htim1;
@@ -166,6 +169,30 @@ void DebugMon_Handler(void)
 /******************************************************************************/
 
 /**
+  * @brief This function handles ADC1, ADC2 and ADC3 interrupts.
+  */
+void ADC_IRQHandler(void)
+{
+  /* USER CODE BEGIN ADC_IRQn 0 */
+  if (__HAL_ADC_GET_FLAG(&hadc1, ADC_FLAG_EOC))
+  {
+    // Read Data (Clears flag)
+    uint16_t raw_val = HAL_ADC_GetValue(&hadc1);
+
+    // Send to Queue
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    xQueueSendFromISR(ecgQueue, &raw_val, &xHigherPriorityTaskWoken);
+
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+  }
+  /* USER CODE END ADC_IRQn 0 */
+  HAL_ADC_IRQHandler(&hadc1);
+  /* USER CODE BEGIN ADC_IRQn 1 */
+
+  /* USER CODE END ADC_IRQn 1 */
+}
+
+/**
   * @brief This function handles TIM1 update interrupt and TIM10 global interrupt.
   */
 void TIM1_UP_TIM10_IRQHandler(void)
@@ -215,7 +242,7 @@ void DMA2_Stream3_IRQHandler(void)
     portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
   }
   /* USER CODE END DMA2_Stream3_IRQn 0 */
-  // HAL_DMA_IRQHandler(&hdma_spi1_tx);
+  HAL_DMA_IRQHandler(&hdma_spi1_tx);
   /* USER CODE BEGIN DMA2_Stream3_IRQn 1 */
 
   /* USER CODE END DMA2_Stream3_IRQn 1 */

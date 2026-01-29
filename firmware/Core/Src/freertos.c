@@ -22,7 +22,6 @@
 #include "task.h"
 #include "main.h"
 #include "cmsis_os.h"
-#include "PanTompkins.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -32,6 +31,8 @@
 #include "ad8232.h"
 #include "graph.h"
 #include "heart_rate.h"
+#include "PanTompkins.h"
+#include "tim.h"
 
 /* USER CODE END Includes */
 
@@ -75,9 +76,9 @@ osThreadId UITaskHandle;
 
 /* USER CODE END FunctionPrototypes */
 
-void Algorithm_Task(void const * argument);
-void Data_Task(void const * argument);
-void GUI_Task(void const * argument);
+void StartDefaultTask(void const * argument);
+void StartTask02(void const * argument);
+void StartTask03(void const * argument);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
@@ -134,15 +135,15 @@ void MX_FREERTOS_Init(void) {
 
   /* Create the thread(s) */
   /* definition and creation of graphTask */
-  osThreadDef(graphTask, Algorithm_Task, osPriorityNormal, 0, 512);
+  osThreadDef(graphTask, StartDefaultTask, osPriorityNormal, 0, 512);
   graphTaskHandle = osThreadCreate(osThread(graphTask), NULL);
 
   /* definition and creation of sensorTask */
-  osThreadDef(sensorTask, Data_Task, osPriorityRealtime, 0, 256);
+  osThreadDef(sensorTask, StartTask02, osPriorityRealtime, 0, 256);
   sensorTaskHandle = osThreadCreate(osThread(sensorTask), NULL);
 
   /* definition and creation of UITask */
-  osThreadDef(UITask, GUI_Task, osPriorityLow, 0, 128);
+  osThreadDef(UITask, StartTask03, osPriorityLow, 0, 128);
   UITaskHandle = osThreadCreate(osThread(UITask), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
@@ -158,11 +159,12 @@ void MX_FREERTOS_Init(void) {
   * @retval None
   */
 /* USER CODE END Header_StartDefaultTask */
-void Algorithm_Task(void const * argument)
+void StartDefaultTask(void const * argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
   PT_init();
   uint16_t val_from_queue;
+  uint16_t filtered_val;
   uint32_t current_time;
 
   for (;;)
@@ -172,8 +174,9 @@ void Algorithm_Task(void const * argument)
     // --- DATA PROCESSING ---
     if (xQueueReceive(ecgQueue, &val_from_queue, 1) == pdTRUE) {
 
-      Process_Graph(val_from_queue);
-      Process_HeartRate(val_from_queue, current_time);
+      filtered_val = Filter_Signal(val_from_queue);
+      Process_Graph(filtered_val);
+      Process_HeartRate(filtered_val, current_time);
 
     }
   }
@@ -187,43 +190,19 @@ void Algorithm_Task(void const * argument)
 * @retval None
 */
 /* USER CODE END Header_StartTask02 */
-void Data_Task(void const * argument)
+void StartTask02(void const * argument)
 {
   /* USER CODE BEGIN StartTask02 */
-  TickType_t xLastWakeTime = xTaskGetTickCount();
+  // 1. Start ADC in Interrupt Mode (It waits for the Trigger)
+  HAL_ADC_Start_IT(&hadc1);
 
-  // Define Sample Rate - 1ms = 1000Hz Sampling
-  const TickType_t xFrequency = pdMS_TO_TICKS(1);
-
-  // Debug to check dropped samples
-  static uint32_t dropped_sample_count = 0;
+  // 2. Start the Timer (The Metronome starts ticking)
+  HAL_TIM_Base_Start(&htim2);
 
   for(;;)
-
   {
-    // --- Start Polling Sequence ---
-    HAL_ADC_Start(&hadc1);
-
-    // Check if hardware is active
-    if (HAL_ADC_PollForConversion(&hadc1, 2) == HAL_OK) {
-
-      // Read data from the HAL
-      uint16_t raw = AD8232_Read();
-
-      // Minimal Noise Filter (O(1))
-      uint16_t filtered = Filter_Signal(raw);
-
-      // Queue error handling
-      if (xQueueSend(ecgQueue, &filtered, 0) != pdTRUE) {
-        dropped_sample_count++;
-      }
-      else {
-        // Hardware Failure Mode: ADC did not respond
-        // feat: Add Hardware Error Message Here
-      }
-    }
-
-    vTaskDelayUntil(&xLastWakeTime, xFrequency);
+    // The ISR handles the data. This task can sleep or monitor battery.
+    osDelay(1000);
   }
   /* USER CODE END StartTask02 */
 }
@@ -235,18 +214,17 @@ void Data_Task(void const * argument)
 * @retval None
 */
 /* USER CODE END Header_StartTask03 */
-/* USER CODE END Header_StartUITask */
-void GUI_Task(void const * argument)
+void StartTask03(void const * argument)
 {
-  /* USER CODE BEGIN StartUITask */
+  /* USER CODE BEGIN StartTask03 */
   char bpm_str[16];
   uint8_t last_drawn_bpm = 255;
 
   if (xSemaphoreTake(lcdSpiSemaphore, portMAX_DELAY) == pdTRUE) {
-      ILI_Fill(0x0000);
-      ILI_WriteString(10, 10, "ECG MONITOR", 0xFFFF, 0x0000, &Font_7x10);
-      ILI_DrawHLine(0, 50, 320, 0x7BEF); // Header Line
-      xSemaphoreGive(lcdSpiSemaphore);
+    ILI_Fill(0x0000);
+    ILI_WriteString(10, 10, "ECG MONITOR", 0xFFFF, 0x0000, &Font_7x10);
+    ILI_DrawHLine(0, 50, 320, 0x7BEF); // Header Line
+    xSemaphoreGive(lcdSpiSemaphore);
   }
 
   for (;;)
@@ -264,7 +242,7 @@ void GUI_Task(void const * argument)
       last_drawn_bpm = global_bpm;
     }
   }
-  /* USER CODE END StartUITask */
+  /* USER CODE END StartTask03 */
 }
 
 /* Private application code --------------------------------------------------*/
