@@ -1,76 +1,167 @@
-# Real-Time STM32 Heart Monitor (Medical-Grade Prototype)
+# Real-Time STM32 ECG Monitor — Hard Real-Time Firmware
 
-A high-fidelity, hard-real-time ECG monitoring system engineered on the STM32F446RE. This project demonstrates the bridge between **clinical physiology** and **bare-metal firmware**, featuring 1kHz hardware-synchronized sampling, zero-copy DMA graphics, and thread-safe FreeRTOS architecture.
+A hard real-time ECG monitoring system engineered on the STM32F446RE (Cortex-M4), featuring deterministic 1kHz hardware-synchronized sampling, a custom bare-metal DMA graphics driver, Pan-Tompkins QRS detection, and a safety-critical FreeRTOS architecture. Designed with IEC 62304 Software as a Medical Device lifecycle principles from the ground up.
 
-![System Architecture](https://img.shields.io/badge/Architecture-Hybrid%20ISR%2FRTOS-blue)
-![Sampling](https://img.shields.io/badge/Sampling-1kHz%20Hardware%20Trigger-green)
-![Optimization](https://img.shields.io/badge/Graphics-Bare--Metal%20DMA-red)
-![Standard](https://img.shields.io/badge/Standard-ISO%2062304-orange)
-
-## 🩺 Project Scope
-* **Objective:** Develop a clinical-grade ECG monitor capable of arrhythmia detection.
-* **Hardware:** STM32F446RE (Cortex-M4), AD8232 AFE, ILI9341 TFT.
-* **Key Standard:** Designed with **ISO 62304** (Medical Software Lifecycle) principles in mind.
-
-## ⚡ Key Technical Features
-
-### 1. Deterministic 1kHz Sampling (Hardware-Triggered)
-Unlike standard polling loops, this system uses **TIM2 (Timer 2)** as a hardware metronome to trigger the ADC exactly every 1000µs.
-* **Jitter:** < 1µs (Hardware Controlled).
-* **Mechanism:** `TIM2 Update Event` -> `ADC Trigger` -> `DMA Transfer` -> `ISR`.
-* **Zero CPU Overhead:** The CPU is not involved until the buffer is ready.
-
-### 2. Custom Bare-Metal DMA Graphics Driver
-To achieve 60FPS refresh rates without stalling the heart rate algorithm, I bypassed the HAL (Hardware Abstraction Layer) for the critical rendering path.
-* **Implementation:** Direct register access to `DMA2_Stream3` and `SPI1->DR`.
-* **Optimization:** Combined `0x2C` (Memory Write) command and Pixel Data into a single atomic SPI transaction by manually controlling the Chip Select (CS) pin, eliminating inter-packet delays.
-* **Result:** 400% speedup vs standard HAL_SPI_Transmit.
-
-### 3. DSP & Signal Processing
-* **Filtering:** Recursive FIR (Boxcar) filter tuned to 1kHz sampling rate to reject high-frequency noise while preserving QRS complex morphology.
-* **Algorithm:** Pan-Tompkins implementation for real-time QRS detection and R-R interval calculation.
-
-### 4. Safety-Critical Architecture
-* **Asystole Watchdog (Stale Data Protection):** Implemented a software watchdog that monitors inter-beat intervals. If no R-peak is detected for >3 seconds (Asystole condition), the BPM state is forced to 0 to prevent the display of potentially dangerous "stale" vital signs.
-* **Thread Safety:** Inter-task communication via FreeRTOS Binary Semaphores ensures atomic access to the shared SPI bus.
-* **Validation:** Signal path validated against 1kHz hardware timing requirements.
-
-## 📂 Repository Structure
-```text
-/firmware           # STM32 Firmware Source (Main Logic)
-/docs           # Verification & Architecture Documentation
-  ├── ARCHITECTURE.md       # System Block Diagram & ISR Flows
-  ├── VERIFICATION.md       # Logic Analyzer Traces & 1kHz Validation
-  └── TEST_PLAN.md          # Unit Test Strategy
-```
-## 🚀 Build & Flash
-This project supports both **CMake** (CLion/VSCode) and **STM32CubeIDE** workflows.
-
-### Option A: CLion / CMake (Recommended)
-1.  **Open Project:** Open the repository root in CLion.
-2.  **Load CMake:** The `CMakeLists.txt` will automatically detect the `arm-none-eabi-gcc` toolchain.
-3.  **Build:** Click **Build** (Hammer icon).
-4.  **Flash:** Run the OpenOCD Run/Debug configuration.
-
-### Option B: STM32CubeIDE
-1.  **Import:** File -> Import -> Existing STM32 Project.
-2.  **Build:** Project -> Build All.
-3.  **Debug:** Run As -> STM32 Cortex-M C/C++ Application.
-
-### Hardware Setup
-| Component | Pin | Function | Notes |
-| :--- | :--- | :--- | :--- |
-| **AD8232 Sensor** | `PA0` | **ADC1_IN0** | Analog Output |
-| **ILI9341 Display** | `PA5` | **SPI1_SCK** | Clock |
-| | `PA6` | **SPI1_MISO** | (Not used for TX only) |
-| | `PA7` | **SPI1_MOSI** | Data Line |
-| | `PB6` | **CS** | Chip Select (Manually Controlled) |
-| | `PC7` | **DC** | Data/Command |
-
-## 🧪 Verification Status
-* [x] **Sampling Fidelity:** Verified 1.000ms delta between samples via GPIO toggle trace.
-* [x] **Thread Safety:** Verified Semaphore functionality between `DMA_ISR` and `GUI_Task`.
-* [x] **Signal Integrity:** Confirmed 60Hz noise rejection via FIR filter stage.
+This project represents the embedded firmware component of a larger real-time arrhythmia detection system. The companion ML model (quantized 1D-CNN for on-device rhythm classification) is documented separately in [ecg-rhythm-classifier](../ecg-rhythm-classifier).
 
 ---
+
+## Verified Performance
+
+| Metric | Result | Method |
+|--------|--------|--------|
+| Sampling Rate | 1kHz deterministic | Hardware TIM2 trigger |
+| Sampling Jitter | < 0.1µs | Logic analyzer, 10,000 samples |
+| Graphics CPU Load | 2% during full redraw | FreeRTOS Idle Task measurement |
+| DMA vs HAL Speedup | 400% | Benchmark vs HAL_SPI_Transmit |
+| Total Signal Latency | ~18ms end-to-end | Pipeline stage analysis |
+| 60Hz Noise Rejection | Verified | FIR filter, pre/post ADC comparison |
+
+> Full verification evidence in [`docs/V_V.md`](docs/V_V.md)
+
+---
+
+## Key Technical Features
+
+### 1. Deterministic 1kHz Sampling
+Hardware-triggered ADC via TIM2 — no polling loops, no scheduler dependency.
+
+```
+TIM2 Update Event (1ms) → ADC1 Trigger → DMA Transfer → ADC_IRQHandler
+```
+
+- Jitter: < 0.1µs (hardware-controlled, verified on logic analyzer)
+- Zero CPU overhead during acquisition — CPU not involved until buffer is ready
+- Interrupt priority: TIM2 at highest NVIC priority (0) to prevent metronome jitter
+
+### 2. Custom Bare-Metal DMA Graphics Driver
+HAL bypassed entirely for the critical rendering path. Direct register access to `DMA2_Stream3` and `SPI1->DR`.
+
+| Implementation | CPU Load | Frame Draw Time | Blocking |
+|----------------|----------|-----------------|----------|
+| HAL_SPI_Transmit | 98% | 42ms | Yes |
+| Bare-Metal DMA | **2%** | **11ms** | **No** |
+
+The `0x2C` memory write command and pixel data are combined into a single atomic SPI transaction via manual CS pin control, eliminating inter-packet delays. This keeps the Algorithm_Task free to process ECG data during screen updates.
+
+### 3. DSP & Signal Processing
+- **Filtering:** 17-tap recursive FIR (boxcar) filter tuned to 1kHz sampling rate, creating a spectral null at ~59Hz to reject power line interference while preserving QRS morphology
+- **Algorithm:** Pan-Tompkins implementation — squaring, integration, adaptive thresholding — for real-time R-peak detection and R-R interval calculation
+
+### 4. Safety-Critical Architecture
+- **Asystole Watchdog:** Monitors inter-beat intervals. If no R-peak detected for >3 seconds, forces `BPM = 0` to prevent stale vital sign display — the highest-severity failure mode identified in the FMEA
+- **Thread Safety:** FreeRTOS binary semaphore (`lcdSpiSemaphore`) enforces atomic SPI bus access between DMA ISR and GUI_Task
+- **Stack Guards:** FreeRTOS `vApplicationStackOverflowHook` enabled across all tasks
+
+---
+
+## System Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│              Hard Real-Time Acquisition Layer               │
+│                                                             │
+│  TIM2 (1kHz) ──► ADC1 (PA0) ──► ADC_IRQHandler              │
+│                                       │                     │
+│                               ecgQueue (FreeRTOS)           │
+└───────────────────────────────────────┼─────────────────────┘
+                                        │
+┌───────────────────────────────────────▼─────────────────────┐
+│              Soft Real-Time Processing Layer                │
+│                                                             │
+│  Algorithm_Task (High Priority)                             │
+│    ├── Recursive FIR Filter (60Hz rejection)                │
+│    ├── Pan-Tompkins QRS Detection                           │
+│    ├── R-R Interval → BPM Calculation                       │
+│    └── Asystole Watchdog (>3s no beat → BPM = 0)            │
+└───────────────────────────────────────┬─────────────────────┘
+                                        │
+┌───────────────────────────────────────▼─────────────────────┐
+│              Visualization Layer (Background)               │
+│                                                             │
+│  GUI_Task (Normal Priority)                                 │
+│    ├── Acquire lcdSpiSemaphore                              │
+│    ├── DMA2_Stream3 → SPI1 → ILI9341                        │
+│    └── Release semaphore on Transfer Complete + BSY clear   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+Full interrupt priority scheme and memory layout documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+---
+
+## Formal Documentation
+
+This project was developed with IEC 62304 Software as a Medical Device lifecycle principles. The `/docs` directory contains full engineering artifacts:
+
+| Document | Contents |
+|----------|----------|
+| [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Data flow pipeline, concurrency model, NVIC priority scheme, memory layout |
+| [`RISK_ANALYSIS.md`](docs/RISK_ANALYSIS.md) | ISO 14971 FMEA — 5 identified hazards with severity ratings and software mitigations |
+| [`TEST_PLAN.md`](docs/TEST_PLAN.md) | Three-level test strategy (Unit → Integration → System), SOUP management table |
+| [`V_V.md`](docs/V_V.md) | Verified timing fidelity, DMA benchmark data, latency pipeline analysis, noise rejection results |
+
+---
+
+## Hardware
+
+| Component | Pin | Function |
+|-----------|-----|----------|
+| STM32F446RE | — | Cortex-M4, target MCU |
+| AD8232 AFE | PA0 | ADC1_IN0 — ECG analog signal |
+| ILI9341 TFT | PA5 | SPI1_SCK |
+| | PA7 | SPI1_MOSI |
+| | PB6 | CS (manually controlled) |
+| | PC7 | DC (Data/Command) |
+
+---
+
+## Build & Flash
+
+### CLion / CMake
+```bash
+# Open repository root in CLion
+# CMakeLists.txt auto-detects arm-none-eabi-gcc toolchain
+# Build → Flash via OpenOCD Run/Debug configuration
+```
+
+### STM32CubeIDE
+```
+File → Import → Existing STM32 Project
+Project → Build All
+Run As → STM32 Cortex-M C/C++ Application
+```
+
+---
+
+## Tech Stack
+
+| Component | Detail |
+|-----------|--------|
+| Target MCU | STM32F446RE (Cortex-M4) |
+| RTOS | FreeRTOS 10.3.1 |
+| HAL | STM32 HAL 1.25.0 (bypassed for critical paths) |
+| DSP | CMSIS-DSP 1.8.0 |
+| Unit Testing | Unity (C) |
+| Toolchain | arm-none-eabi-gcc, CMake / STM32CubeIDE |
+| Verification | Saleae Logic Analyzer, Oscilloscope |
+
+---
+
+## Project Structure
+
+```
+stm32-ecg-monitor/
+├── firmware/                   # STM32 firmware source
+├── docs/
+│   ├── ARCHITECTURE.md         # System block diagram & ISR flows
+│   ├── RISK_ANALYSIS.md        # ISO 14971 FMEA
+│   ├── TEST_PLAN.md            # Unit/integration/system test strategy
+│   └── V_V.md                  # Verification & validation results
+├── CMakeLists.txt
+└── README.md
+```
+
+---
+
 *Author: Andrew V. Franco*
