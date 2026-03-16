@@ -2,7 +2,7 @@
 
 A hard real-time ECG monitoring system engineered on the STM32F446RE (Cortex-M4), featuring deterministic 1kHz hardware-synchronized sampling, a custom bare-metal DMA graphics driver, Pan-Tompkins QRS detection, and a safety-critical FreeRTOS architecture. Designed with IEC 62304 Software as a Medical Device lifecycle principles from the ground up.
 
-This project represents the embedded firmware component of a larger real-time arrhythmia detection system. The companion ML model (quantized 1D-CNN for on-device rhythm classification) is documented separately in [ecg-rhythm-classifier](../ecg-rhythm-classifier).
+This project represents the embedded firmware component of a larger real-time arrhythmia detection system. The companion ML model (quantized 1D-CNN for on-device rhythm classification) is documented separately.
 
 ---
 
