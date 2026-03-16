@@ -17,7 +17,7 @@ This project represents the embedded firmware component of a larger real-time ar
 | Total Signal Latency | ~18ms end-to-end | Pipeline stage analysis |
 | 60Hz Noise Rejection | Verified | FIR filter, pre/post ADC comparison |
 
-> Full verification evidence in [`docs/V_V.md`](docs/V_V.md)
+> Full verification evidence in [`docs/V&V.md`](docs/V&V.md)
 
 ---
 
@@ -94,12 +94,12 @@ Full interrupt priority scheme and memory layout documented in [`docs/ARCHITECTU
 
 This project was developed with IEC 62304 Software as a Medical Device lifecycle principles. The `/docs` directory contains full engineering artifacts:
 
-| Document | Contents |
-|----------|----------|
-| [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Data flow pipeline, concurrency model, NVIC priority scheme, memory layout |
+| Document                                    | Contents |
+|---------------------------------------------|----------|
+| [`ARCHITECTURE.md`](docs/ARCHITECTURE.md)   | Data flow pipeline, concurrency model, NVIC priority scheme, memory layout |
 | [`RISK_ANALYSIS.md`](docs/RISK_ANALYSIS.md) | ISO 14971 FMEA — 5 identified hazards with severity ratings and software mitigations |
-| [`TEST_PLAN.md`](docs/TEST_PLAN.md) | Three-level test strategy (Unit → Integration → System), SOUP management table |
-| [`V_V.md`](docs/V_V.md) | Verified timing fidelity, DMA benchmark data, latency pipeline analysis, noise rejection results |
+| [`TEST_PLAN.md`](docs/TEST_PLAN.md)         | Three-level test strategy (Unit → Integration → System), SOUP management table |
+| [`V&V.md`](docs/V&V.md)                     | Verified timing fidelity, DMA benchmark data, latency pipeline analysis, noise rejection results |
 
 ---
 
@@ -157,7 +157,7 @@ stm32-ecg-monitor/
 │   ├── ARCHITECTURE.md         # System block diagram & ISR flows
 │   ├── RISK_ANALYSIS.md        # ISO 14971 FMEA
 │   ├── TEST_PLAN.md            # Unit/integration/system test strategy
-│   └── V_V.md                  # Verification & validation results
+│   └── V&V.md                  # Verification & validation results
 ├── CMakeLists.txt
 └── README.md
 ```
