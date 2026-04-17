@@ -33,6 +33,7 @@
 #include "heart_rate.h"
 #include "PanTompkins.h"
 #include "tim.h"
+#include "inference.h"
 
 /* USER CODE END Includes */
 
@@ -54,6 +55,16 @@
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
 
+// ECG window
+#define INFERENCE_INTERVAL 150
+float    ecg_window[ECG_WINDOW_SIZE];
+uint16_t window_idx       = 0;
+uint16_t samples_since_inference = 0;
+uint8_t  window_primed    = 0;
+
+volatile RhythmClass_t global_rhythm   = RHYTHM_NONE;
+volatile float         global_confidence = 0.0f;
+
 // --- SHARED DATA ---
 volatile uint8_t global_bpm = 0;
 
@@ -67,20 +78,23 @@ extern SPI_HandleTypeDef hspi1;
 // --- RTOS OBJECTS ---
 QueueHandle_t ecgQueue;
 SemaphoreHandle_t lcdSpiSemaphore;
+SemaphoreHandle_t inferenceReadySemaphore;
 
 /* USER CODE END Variables */
 osThreadId graphTaskHandle;
 osThreadId sensorTaskHandle;
 osThreadId UITaskHandle;
+osThreadId inferenceTaskHandle;
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
 
 /* USER CODE END FunctionPrototypes */
 
-void StartDefaultTask(void const * argument);
-void StartTask02(void const * argument);
-void StartTask03(void const * argument);
+void StartGraphTask(void const * argument);
+void StartSensorTask(void const * argument);
+void StartUITask(void const * argument);
+void StartInferenceTask(void const * argument);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
@@ -110,9 +124,11 @@ void MX_FREERTOS_Init(void) {
 
   ecgQueue = xQueueCreate(128, sizeof(uint16_t));
 
-  // Create Semaphore (Binary)
+  // Create Semaphores (Binary)
   lcdSpiSemaphore = xSemaphoreCreateBinary();
-  xSemaphoreGive(lcdSpiSemaphore); // Give it once so it starts "Unlocked"
+  xSemaphoreGive(lcdSpiSemaphore);
+
+  inferenceReadySemaphore = xSemaphoreCreateBinary();
 
   // Start ADC
   HAL_ADC_Start(&hadc1);
@@ -137,16 +153,20 @@ void MX_FREERTOS_Init(void) {
 
   /* Create the thread(s) */
   /* definition and creation of graphTask */
-  osThreadDef(graphTask, StartDefaultTask, osPriorityNormal, 0, 512);
+  osThreadDef(graphTask, StartGraphTask, osPriorityNormal, 0, 512);
   graphTaskHandle = osThreadCreate(osThread(graphTask), NULL);
 
   /* definition and creation of sensorTask */
-  osThreadDef(sensorTask, StartTask02, osPriorityRealtime, 0, 256);
+  osThreadDef(sensorTask, StartSensorTask, osPriorityRealtime, 0, 256);
   sensorTaskHandle = osThreadCreate(osThread(sensorTask), NULL);
 
   /* definition and creation of UITask */
-  osThreadDef(UITask, StartTask03, osPriorityLow, 0, 128);
+  osThreadDef(UITask, StartUITask, osPriorityLow, 0, 128);
   UITaskHandle = osThreadCreate(osThread(UITask), NULL);
+
+  /* definition and creation of inferenceTask */
+  osThreadDef(inferenceTask, StartInferenceTask, osPriorityIdle, 0, 1024);
+  inferenceTaskHandle = osThreadCreate(osThread(inferenceTask), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -154,82 +174,109 @@ void MX_FREERTOS_Init(void) {
 
 }
 
-/* USER CODE BEGIN Header_StartDefaultTask */
+/* USER CODE BEGIN Header_StartGraphTask */
 /**
-  * @brief  Function implementing the displayTask thread.
+  * @brief  Function implementing the graphTask thread.
   * @param  argument: Not used
   * @retval None
   */
-/* USER CODE END Header_StartDefaultTask */
-void StartDefaultTask(void const * argument)
+/* USER CODE END Header_StartGraphTask */
+void StartGraphTask(void const * argument)
 {
-  /* USER CODE BEGIN StartDefaultTask */
+  /* USER CODE BEGIN StartGraphTask */
   PT_init();
   uint16_t val_from_queue;
   uint16_t filtered_val;
   uint32_t current_time;
+  uint8_t decimation_counter = 0;
 
-  for (;;)
+  /* Infinite loop */
+  for(;;)
   {
-      current_time = HAL_GetTick();
+    current_time = HAL_GetTick();
 
     // --- DATA PROCESSING ---
     if (xQueueReceive(ecgQueue, &val_from_queue, 1) == pdTRUE) {
 
       filtered_val = Filter_Signal(val_from_queue);
+
+      // Keep UI and Heart Rate running at 1kHz for accuracy/smoothness
       Process_Graph(filtered_val);
       Process_HeartRate(filtered_val, current_time);
 
+      // --- DOWNSAMPLING LOGIC (1kHz -> 100Hz) ---
+      decimation_counter++;
+      if (decimation_counter >= 10) {
+        decimation_counter = 0; // Reset counter
+
+        // Write into the AI circular buffer (happens 100 times a second)
+        ecg_window[window_idx] = ((float)filtered_val - 2048.0f) / 2048.0f;
+        window_idx = (window_idx + 1) % ECG_WINDOW_SIZE;
+
+        // Prime check — wait for first full 10-second window before inferring
+        if (!window_primed) {
+          if (window_idx == 0) window_primed = 1;
+          continue;
+        }
+
+        // Trigger inference every INFERENCE_INTERVAL samples
+        // (150 samples at 100Hz = triggers every 1.5 seconds)
+        samples_since_inference++;
+        if (samples_since_inference >= INFERENCE_INTERVAL) {
+          samples_since_inference = 0;
+          xSemaphoreGive(inferenceReadySemaphore);
+        }
+      }
     }
   }
-  /* USER CODE END StartDefaultTask */
+  /* USER CODE END StartGraphTask */
 }
 
-/* USER CODE BEGIN Header_StartTask02 */
+/* USER CODE BEGIN Header_StartSensorTask */
 /**
 * @brief Function implementing the sensorTask thread.
 * @param argument: Not used
 * @retval None
 */
-/* USER CODE END Header_StartTask02 */
-void StartTask02(void const * argument)
+/* USER CODE END Header_StartSensorTask */
+void StartSensorTask(void const * argument)
 {
-  /* USER CODE BEGIN StartTask02 */
-  // 1. Start ADC in Interrupt Mode (It waits for the Trigger)
-  HAL_ADC_Start_IT(&hadc1);
-
-  // 2. Start the Timer (The Metronome starts ticking)
-  HAL_TIM_Base_Start(&htim2);
-
+  /* USER CODE BEGIN StartSensorTask */
+    HAL_ADC_Start_IT(&hadc1);
+    HAL_TIM_Base_Start(&htim2);
+  /* Infinite loop */
   for(;;)
   {
-    // The ISR handles the data. This task can sleep or monitor battery.
     osDelay(1000);
   }
-  /* USER CODE END StartTask02 */
+  /* USER CODE END StartSensorTask */
 }
 
-/* USER CODE BEGIN Header_StartTask03 */
+/* USER CODE BEGIN Header_StartUITask */
 /**
 * @brief Function implementing the UITask thread.
 * @param argument: Not used
 * @retval None
 */
-/* USER CODE END Header_StartTask03 */
-void StartTask03(void const * argument)
+/* USER CODE END Header_StartUITask */
+void StartUITask(void const * argument)
 {
-  /* USER CODE BEGIN StartTask03 */
+  /* USER CODE BEGIN StartUITask */
   char bpm_str[16];
+  char conf_str[16];
   uint8_t last_drawn_bpm = 255;
+  float last_drawn_conf = 0;
 
   if (xSemaphoreTake(lcdSpiSemaphore, portMAX_DELAY) == pdTRUE) {
     ILI_Fill(0x0000);
     ILI_WriteString(10, 10, "ECG MONITOR", 0xFFFF, 0x0000, &Font_7x10);
+    ILI_WriteString(190, 10, "RHYTHM ANALYSIS", 0xFFFF, 0x0000, &Font_7x10);
     ILI_DrawHLine(0, 50, 320, 0x7BEF); // Header Line
     xSemaphoreGive(lcdSpiSemaphore);
   }
 
-  for (;;)
+  /* Infinite loop */
+  for(;;)
   {
     osDelay(200);
 
@@ -238,13 +285,52 @@ void StartTask03(void const * argument)
         ILI_Safe_WriteString(0, 30, "- 0 BPM     ", 0xF800, 0x0000, &Font_11x18);
       }
       else {
-        sprintf(bpm_str, "- %3d BPM    ", global_bpm);
+        sprintf(bpm_str, "+ %3d BPM    ", global_bpm);
         ILI_Safe_WriteString(0, 30, bpm_str, 0xF800, 0x0000, &Font_11x18);
       }
       last_drawn_bpm = global_bpm;
     }
+
+    if (global_confidence != last_drawn_conf) {
+      if (global_confidence > .75) {
+        ILI_Safe_WriteString(200, 30, (char*)get_rhythm_string(global_rhythm),0xF800, 0x0000, &Font_7x10);
+        sprintf(conf_str, "%3d%%", (int)(global_confidence * 100.0f));
+        ILI_Safe_WriteString(160, 30, conf_str, 0xF800, 0x0000, &Font_7x10);
+      }
+      else {
+        ILI_Safe_WriteString(200, 30, "UNSURE - CHECK",0xF800, 0x0000, &Font_7x10);
+        sprintf(conf_str, "%3d%%", (int)(global_confidence * 100.0f));
+        ILI_Safe_WriteString(160, 30, conf_str, 0xF800, 0x0000, &Font_7x10);
+      }
+    }
+    last_drawn_conf = global_confidence;
+
   }
-  /* USER CODE END StartTask03 */
+  /* USER CODE END StartUITask */
+}
+
+/* USER CODE BEGIN Header_StartInferenceTask */
+/**
+* @brief Function implementing the inferenceTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartInferenceTask */
+__weak void StartInferenceTask(void const * argument)
+{
+  /* USER CODE BEGIN StartInferenceTask */
+  if (!inference_init()) {
+    while(1) { osDelay(1000); }
+  }
+
+  /* Infinite loop */
+  for(;;)
+  {
+    if (xSemaphoreTake(inferenceReadySemaphore, portMAX_DELAY) == pdTRUE) {
+      global_rhythm = inference_run((float*)ecg_window, window_idx, (float *)&global_confidence);
+    }
+  }
+  /* USER CODE END StartInferenceTask */
 }
 
 /* Private application code --------------------------------------------------*/
