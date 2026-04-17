@@ -31,7 +31,7 @@ static uint32_t graph_sum = 0;
 static uint8_t graph_count = 0;
 static uint8_t dma_buffer[480]; // Max column height (240) * 2 bytes
 static uint16_t x_pos = 0;
-static uint16_t last_y_pos = 120;
+static uint16_t last_y_pos = 145;
 static uint16_t line_color = 0x07E0;
 
 // HR Debug
@@ -50,7 +50,7 @@ void Process_Graph(uint16_t raw_value) {
         // 1. Calc Y
         int32_t centered = (int32_t)val_to_draw - 2048;
         centered *= amplitude;
-        int16_t y = 120 - (centered * 120 / 2048);
+        int16_t y = 145 - (centered * 145 / 2048);
         if (y < 51) y = 51;
         if (y > 239) y = 239;
 

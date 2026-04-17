@@ -70,3 +70,12 @@ add_custom_command(TARGET $${PROJECT_NAME}.elf POST_BUILD
         COMMAND $${CMAKE_OBJCOPY} -Obinary $<TARGET_FILE:$${PROJECT_NAME}.elf> $${BIN_FILE}
         COMMENT "Building $${HEX_FILE}
 Building $${BIN_FILE}")
+
+# Link the AI library
+
+set(AI_LIB_PATH "${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/ST/AI/Lib/NetworkRuntime1020_CM4_GCC.a")
+
+target_link_libraries(${PROJECT_NAME}.elf
+    PRIVATE
+    "${AI_LIB_PATH}"
+)
